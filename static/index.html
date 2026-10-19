@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LinkedIn Lead Finder</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a66c2'/%3E%3Ctext x='16' y='23' font-family='Arial' font-weight='700' font-size='18' fill='white' text-anchor='middle'%3Ein%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo">in</span><span>LinkedIn Lead Finder</span></div>
+    <div class="top-right">
+      <span id="serverStatus" class="chip">Connecting…</span>
+      <button id="openSettings" class="btn">⚙ Settings</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden>
+    <span id="bannerText"></span>
+    <button id="bannerClose" class="banner-close" aria-label="Close">×</button>
+  </div>
+
+  <main>
+    <!-- STEP 1: get leads -->
+    <section class="card">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="paste" role="tab">1. Paste from Sales Navigator</button>
+        <button class="tab" data-tab="xray" role="tab">Custom lead search (find new people)</button>
+      </div>
+
+      <div class="tabpane" id="tab-paste">
+        <p class="hint">In Sales Navigator open a lead list or search results page, press <kbd>Ctrl</kbd>+<kbd>A</kbd> then
+          <kbd>Ctrl</kbd>+<kbd>C</kbd>, and paste here. Extra text such as “Saved Badge”, “2nd”, “Add note” or dates is
+          removed automatically. Paste one page at a time: each paste is <b>added</b> to your sheet and duplicates are skipped.
+          You can also paste a table from Excel or Google Sheets with a header row (Name, Title, Company, Location).</p>
+        <textarea id="pasteBox" spellcheck="false" placeholder="Paste your copied Sales Navigator page here…"></textarea>
+        <div class="row">
+          <button id="parseBtn" class="btn primary">Clean &amp; add leads</button>
+          <label class="btn file">Import CSV file<input type="file" id="csvFile" accept=".csv,.tsv,.txt" hidden></label>
+          <button id="demoBtn" class="btn ghost">Load demo data</button>
+          <span id="parseMsg" class="msg"></span>
+        </div>
+      </div>
+
+      <div class="tabpane" id="tab-xray" hidden>
+        <p class="hint">Find people who are not in your list yet. Every job title is searched with every location
+          (and keyword) as a separate Google query, for example
+          <code>site:linkedin.com/in/ "Head of Operations" "Chennai"</code>. Found profiles are added to the sheet below.
+          Google returns at most about 10 pages per query, so add more titles or locations to get more leads.</p>
+        <div class="grid3">
+          <label>Job titles <small>one per line</small>
+            <textarea id="xTitles" spellcheck="false" placeholder="Head of Operations&#10;Founder&#10;CEO"></textarea></label>
+          <label>Locations <small>one per line, optional</small>
+            <textarea id="xLocations" spellcheck="false" placeholder="Chennai&#10;Bengaluru"></textarea></label>
+          <label>Keywords, industry or company <small>optional</small>
+            <textarea id="xKeywords" spellcheck="false" placeholder="roofing&#10;healthcare"></textarea></label>
+        </div>
+        <div class="grid3">
+          <label>Exclude words <small>comma separated</small>
+            <input id="xExcludes" type="text" placeholder="intern, student, jobs"></label>
+          <label>How many leads do you want?
+            <input id="xTarget" type="number" min="1" step="1" inputmode="numeric"></label>
+          <label>Google pages per query <small>10 results per page</small>
+            <input id="xPages" type="number" min="1" max="10" step="1" inputmode="numeric"></label>
+        </div>
+        <label class="check"><input type="checkbox" id="xCombine"> Put all job titles in one query with OR (fewer searches, fewer results)</label>
+        <details class="adv">
+          <summary>Advanced: write your own Google queries (one per line)</summary>
+          <textarea id="xRaw" spellcheck="false" placeholder='site:linkedin.com/in/ "CFO" "roofing" "Texas"&#10;site:linkedin.com/in/ ("owner" OR "president") "roofing" "Dallas"'></textarea>
+        </details>
+        <div class="row">
+          <button id="xPreview" class="btn">Preview queries</button>
+          <button id="xRun" class="btn primary">Find leads</button>
+          <span id="xMsg" class="msg"></span>
+        </div>
+        <pre id="xQueries" class="queries" hidden></pre>
+      </div>
+    </section>
+
+    <!-- STEP 2: search -->
+    <section class="card">
+      <h2>2. Find their LinkedIn profiles on Google</h2>
+      <div class="grid4">
+        <label>Max leads to search <small>any number, 0 = all</small>
+          <input id="maxLeads" type="number" min="0" step="1" inputmode="numeric"></label>
+        <label>Start at row #
+          <input id="startRow" type="number" min="1" step="1" inputmode="numeric"></label>
+        <label>Google results to check per query <small>1–100</small>
+          <input id="resultsPerQuery" type="number" min="1" max="100" step="1" inputmode="numeric"></label>
+        <label>Queries per lead <small>backup searches if not found</small>
+          <input id="maxQueries" type="number" min="1" max="5" step="1" inputmode="numeric"></label>
+      </div>
+      <label class="check"><input type="checkbox" id="onlyNew"> Only search rows that were not searched yet (and rows with errors)</label>
+      <div class="row">
+        <button id="runBtn" class="btn primary big">▶ Start search</button>
+        <button id="pauseBtn" class="btn" disabled>Pause</button>
+        <button id="stopBtn" class="btn danger" disabled>Stop</button>
+        <span id="estimate" class="msg"></span>
+      </div>
+      <div class="progress" aria-hidden="true"><div id="progressBar"></div></div>
+      <div id="progressText" class="msg"></div>
+    </section>
+
+    <!-- STEP 3: sheet -->
+    <section class="card">
+      <div class="sheethead">
+        <h2>3. Lead sheet <span id="rowCount" class="muted"></span></h2>
+        <input id="searchBox" type="search" placeholder="Filter by name, company, title…">
+      </div>
+      <div class="filters" id="filters">
+        <button class="pill active" data-f="all">All</button>
+        <button class="pill" data-f="matched">Matched</button>
+        <button class="pill" data-f="review">Review</button>
+        <button class="pill" data-f="notfound">Not found</button>
+        <button class="pill" data-f="error">Errors</button>
+        <button class="pill" data-f="pending">Not searched</button>
+      </div>
+      <div class="tablewrap">
+        <table id="sheet">
+          <thead>
+            <tr><th class="num">#</th><th>Name</th><th>Job title</th><th>Company</th><th>Location</th>
+              <th class="urlcol">LinkedIn profile</th><th>Status</th><th class="num">Score</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div id="emptyMsg" class="empty">No leads yet. Paste a Sales Navigator page above, or use Custom lead search.</div>
+      </div>
+      <div class="pager" id="pager"></div>
+
+      <div class="export">
+        <label class="inline">Export
+          <select id="exportScope">
+            <option value="all">all rows</option>
+            <option value="filtered">rows shown by the filter</option>
+            <option value="matched">matched only</option>
+            <option value="matched_review">matched + review</option>
+            <option value="with_url">rows with a LinkedIn URL</option>
+          </select>
+        </label>
+        <button id="xlsxBtn" class="btn primary">⬇ Download Excel (.xlsx)</button>
+        <button id="csvBtn" class="btn">⬇ Download CSV</button>
+        <button id="copyTableBtn" class="btn ghost">Copy table for Google Sheets</button>
+        <button id="copyUrlsBtn" class="btn ghost">Copy URLs</button>
+        <button id="copyQueriesBtn" class="btn ghost">Copy Google queries</button>
+        <button id="columnsBtn" class="btn ghost">Columns…</button>
+        <button id="clearBtn" class="btn danger ghost">Clear sheet</button>
+      </div>
+      <div id="columnsPanel" class="columns" hidden></div>
+    </section>
+  </main>
+
+  <dialog id="settings">
+    <form method="dialog" class="settings">
+      <div class="dialog-head">
+        <h2>Settings</h2>
+        <button class="btn ghost" value="close" aria-label="Close">✕</button>
+      </div>
+
+      <fieldset>
+        <legend>Google search service</legend>
+        <label>Provider
+          <select id="provider">
+            <option value="serpapi">SerpApi (serpapi.com)</option>
+            <option value="serper">Serper (serper.dev)</option>
+            <option value="mock">Mock test mode (fake results, no credits)</option>
+          </select>
+        </label>
+        <div id="keyRow">
+          <label>API key <small id="keyState"></small>
+            <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your API key"></label>
+          <div class="row">
+            <button type="button" id="saveKeyBtn" class="btn primary">Save key</button>
+            <button type="button" id="testKeyBtn" class="btn">Test connection</button>
+          </div>
+        </div>
+        <div class="row"><span id="testMsg" class="msg"></span></div>
+        <p class="hint small">The key is stored only on this computer, in <code>data/config.json</code> next to the tool.
+          One Google page (10 results) = 1 search credit. Repeated searches are answered from a local cache for free.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Search options</legend>
+        <div class="grid2">
+          <label>Google country <small>e.g. in, us, uk – blank = any</small><input id="gl" type="text" maxlength="2"></label>
+          <label>Language <small>e.g. en</small><input id="hl" type="text" maxlength="8"></label>
+          <label>Parallel searches <small>1–5</small><input id="concurrency" type="number" min="1" max="5" step="1"></label>
+          <label>Pause between searches <small>milliseconds</small><input id="delayMs" type="number" min="0" max="60000" step="100"></label>
+          <label>Matched if score ≥<input id="matchMin" type="number" min="1" max="100" step="1"></label>
+          <label>Review if score ≥<input id="reviewMin" type="number" min="1" max="100" step="1"></label>
+          <label>Reuse cached results for <small>days, 0 = never</small><input id="cacheDays" type="number" min="0" max="365" step="1"></label>
+        </div>
+        <label>Query templates <small>one per line, tried in order. Fields: {name} {first} {last} {company} {title} {city} {location}</small>
+          <textarea id="templates" spellcheck="false"></textarea></label>
+        <div class="row">
+          <button type="button" id="resetTemplates" class="btn ghost">Reset templates</button>
+          <button type="button" id="clearCacheBtn" class="btn ghost">Clear search cache</button>
+        </div>
+      </fieldset>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
