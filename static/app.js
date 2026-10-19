@@ -139,7 +139,7 @@
   async function refreshServer() {
     if (location.protocol === 'file:') {
       server = { ok: false };
-      showBanner('error', 'You opened the file directly. Searching needs the local server: double-click START_WINDOWS.bat '
+      showBanner('error', 'You opened the file directly. Searching needs the local server: double-click START_HERE.py '
         + '(or start_mac_linux.sh) and use the page that opens at http://127.0.0.1:8765. Pasting and exporting still work here.');
       renderServer();
       return;
@@ -586,7 +586,7 @@
   function preflight() {
     if (run.active) return false;
     if (!server.ok) {
-      showBanner('error', 'The local server is not connected. Start START_WINDOWS.bat (or start_mac_linux.sh) and reload this page.');
+      showBanner('error', 'The local server is not connected. Start START_HERE.py (or start_mac_linux.sh) and reload this page.');
       return false;
     }
     if (!keyReady()) {
@@ -1130,7 +1130,7 @@
       showBanner('warn', 'Welcome! Open Settings to paste your SerpApi or Serper API key, or pick “Mock test mode” to try everything for free.');
     }
     if (!server.ok && location.protocol !== 'file:') {
-      showBanner('error', 'Cannot reach the local server. Start START_WINDOWS.bat (or start_mac_linux.sh), keep that window open, and reload this page.');
+      showBanner('error', 'Cannot reach the local server. Start START_HERE.py (or start_mac_linux.sh), keep that window open, and reload this page.');
     }
   }
 

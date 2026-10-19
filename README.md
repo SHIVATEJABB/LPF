@@ -24,7 +24,9 @@ reads Google results through a search API (SerpApi or Serper).
 
 1. Extract the whole ZIP to a folder (for example `Documents\LinkedIn Lead Finder`).
    Running it from inside the ZIP does not work.
-2. **Windows:** double-click **`START_WINDOWS.bat`**.
+2. **Windows:** double-click **`START_HERE.py`**. (`START_WINDOWS.bat` does the same, but Windows Smart App
+   Control blocks `.bat` files that came from the internet – see Troubleshooting.)
+   If Windows asks how to open the file, choose **Python**.
    **Mac / Linux:** open Terminal in the folder and run `sh start_mac_linux.sh`.
 3. A black window opens and your browser opens <http://127.0.0.1:8765>.
    **Keep the black window open** while you use the tool. Close it when you are done.
@@ -105,8 +107,9 @@ click **Clear sheet**, or delete the `data` folder.
 | Problem | Fix |
 |---|---|
 | "Python 3 is not installed" | Install Python (step 1) with "Add python.exe to PATH" ticked, then start again. |
-| Red "Server not connected" | The black window was closed. Double-click `START_WINDOWS.bat` again and reload the page. |
-| Page says you opened the file directly | Don't open `index.html` yourself. Start `START_WINDOWS.bat` and use <http://127.0.0.1:8765>. |
+| "Smart App Control blocked…" / "dangerous file extension" | Windows blocks downloaded `.bat` files. Double-click **`START_HERE.py`** instead. Or: delete the folder, right-click the ZIP → **Properties** → tick **Unblock** → **OK**, extract again. |
+| Red "Server not connected" | The black window was closed. Double-click `START_HERE.py` again and reload the page. |
+| Page says you opened the file directly | Don't open `index.html` yourself. Start `START_HERE.py` and use <http://127.0.0.1:8765>. |
 | "Invalid API key" / "run out of searches" | Check the key in Settings → **Test connection**, or your plan at serpapi.com / serper.dev. |
 | "SSL certificate check failed" | Mac: run *Install Certificates.command* in your Python folder. Work PCs: ask IT about HTTPS inspection. |
 | Many **Not found** | Normal for people who are not public on Google. Try a 3rd query per lead, or search them yourself with the **Google** link. |

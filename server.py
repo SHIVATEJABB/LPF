@@ -670,5 +670,36 @@ def main(argv=None):
         httpd.server_close()
 
 
+def _wait_for_enter():
+    try:
+        input("Press Enter to close this window...")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def run(argv=None):
+    """Start the server; on Windows keep the window open if something goes wrong, so the message can be read.
+    (START_WINDOWS.bat already pauses, and sets LLF_FROM_BAT.)"""
+    pause = os.name == "nt" and not os.environ.get("LLF_FROM_BAT")
+    try:
+        main(argv)
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            if not isinstance(e.code, int):
+                print("")
+                print(e.code)
+            if pause:
+                print("")
+                _wait_for_enter()
+            sys.exit(e.code if isinstance(e.code, int) else 1)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        if pause:
+            print("")
+            _wait_for_enter()
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    main()
+    run()

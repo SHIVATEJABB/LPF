@@ -2,6 +2,7 @@
 setlocal
 title LinkedIn Lead Finder
 cd /d "%~dp0"
+set LLF_FROM_BAT=1
 
 if not exist "server.py" (
   echo server.py was not found next to this file.
