@@ -24,6 +24,7 @@
     { key: 'url', label: 'LinkedIn URL', type: 'url', width: 48 },
     { key: 'statusText', label: 'Match Status', width: 14 },
     { key: 'confidence', label: 'Confidence %', type: 'number', width: 13 },
+    { key: 'match', label: 'Filter Match', width: 34 },
     { key: 'degree', label: 'Connection', width: 11 },
     { key: 'resultTitle', label: 'Google Result Title', width: 45 },
     { key: 'snippet', label: 'Google Snippet', width: 60 },
@@ -32,20 +33,35 @@
     { key: 'note', label: 'Notes', width: 40 },
   ];
   const DEFAULT_EXPORT = ['no', 'name', 'firstName', 'lastName', 'title', 'company', 'location', 'url',
-    'statusText', 'confidence', 'degree', 'query', 'source', 'note'];
+    'statusText', 'confidence', 'match', 'degree', 'query', 'source', 'note'];
+
+  const COMPANY_COLUMNS = [
+    { key: 'no', label: 'No.', type: 'number', width: 6 },
+    { key: 'name', label: 'Company', width: 34 },
+    { key: 'industry', label: 'Industry', width: 26 },
+    { key: 'size', label: 'Company Size (employees)', width: 16 },
+    { key: 'hq', label: 'Headquarters', width: 28 },
+    { key: 'followers', label: 'LinkedIn Followers', width: 14 },
+    { key: 'website', label: 'Website', type: 'url', width: 30 },
+    { key: 'url', label: 'LinkedIn Page', type: 'url', width: 48 },
+    { key: 'query', label: 'Search Query Used', width: 50 },
+  ];
 
   const DEFAULTS = {
     maxLeads: 0, startRow: 1, resultsPerQuery: 10, maxQueriesPerLead: 2, onlyNew: true,
     gl: '', hl: 'en', concurrency: 2, delayMs: 300, matchMin: 75, reviewMin: 50, cacheDays: 30,
     templates: C.DEFAULT_TEMPLATES.join('\n'),
     exportScope: 'all', exportColumns: DEFAULT_EXPORT.slice(),
-    xray: { titles: '', locations: '', keywords: '', excludes: '', raw: '', target: 300, maxPages: 5, combineTitles: false },
+    xray: { titles: '', functions: '', seniority: [], companies: '', locations: '', country: '', keywords: '', excludes: '',
+      raw: '', target: 300, maxPages: 5, combineTitles: false, currentOnly: true, strict: false },
+    company: { keywords: '', locations: '', country: '', excludes: '', raw: '', sizes: [], unknownSize: true, target: 100, maxPages: 5 },
   };
+  const NESTED = ['xray', 'company'];
 
   // ---------------------------------------------------------------- state
 
-  const state = { rows: [], nextId: 1, settings: clone(DEFAULTS) };
-  const view = { filter: 'all', search: '', page: 1, pageSize: 100, open: new Set() };
+  const state = { rows: [], companies: [], nextId: 1, settings: clone(DEFAULTS) };
+  const view = { filter: 'all', search: '', page: 1, pageSize: 100, open: new Set(), cpage: 1 };
   const run = newRun();
   let server = { ok: false, provider: '', keys: {} };
 
@@ -68,15 +84,15 @@
   function mergeSettings(saved) {
     const s = clone(DEFAULTS);
     if (saved && typeof saved === 'object') {
+      const same = (a, b) => (Array.isArray(b) ? Array.isArray(a) : a !== undefined && typeof a === typeof b);
       Object.keys(DEFAULTS).forEach(k => {
-        if (k === 'xray') return;
-        if (saved[k] !== undefined && typeof saved[k] === typeof DEFAULTS[k]) s[k] = saved[k];
+        if (NESTED.includes(k)) return;
+        if (same(saved[k], DEFAULTS[k])) s[k] = saved[k];
       });
-      if (saved.xray && typeof saved.xray === 'object') {
-        Object.keys(DEFAULTS.xray).forEach(k => {
-          if (saved.xray[k] !== undefined && typeof saved.xray[k] === typeof DEFAULTS.xray[k]) s.xray[k] = saved.xray[k];
-        });
-      }
+      NESTED.forEach(n => {
+        if (!saved[n] || typeof saved[n] !== 'object') return;
+        Object.keys(DEFAULTS[n]).forEach(k => { if (same(saved[n][k], DEFAULTS[n][k])) s[n][k] = saved[n][k]; });
+      });
       if (Array.isArray(saved.exportColumns)) s.exportColumns = saved.exportColumns.filter(k => COLUMNS.some(c => c.key === k));
     }
     if (!s.exportColumns.length) s.exportColumns = DEFAULT_EXPORT.slice();
@@ -84,7 +100,14 @@
   }
 
   const ROW_FIELDS = ['name', 'firstName', 'lastName', 'title', 'company', 'location', 'degree', 'source', 'url',
-    'status', 'resultTitle', 'snippet', 'query', 'note', 'error'];
+    'status', 'resultTitle', 'snippet', 'query', 'note', 'error', 'match'];
+  const COMPANY_FIELDS = ['name', 'url', 'industry', 'size', 'sizeBucket', 'hq', 'followers', 'website', 'snippet', 'query'];
+
+  function sanitizeCompany(c, id) {
+    const out = { id, selected: c.selected !== false };
+    COMPANY_FIELDS.forEach(k => { out[k] = c[k] == null ? '' : String(c[k]); });
+    return out;
+  }
 
   function sanitizeRow(r, id) {
     const row = { id };
@@ -191,7 +214,7 @@
     try {
       try { localStorage.setItem('llf-settings', JSON.stringify(state.settings)); } catch (e) { /* storage unavailable */ }
       const payload = {
-        version: 2, savedAt: Date.now(), nextId: state.nextId, settings: state.settings,
+        version: 2, savedAt: Date.now(), nextId: state.nextId, settings: state.settings, companies: state.companies,
         rows: state.rows.map(r => Object.assign({}, r, { status: r.status === 'Searching' ? 'Pending' : r.status })),
       };
       if (server.ok) {
@@ -224,6 +247,9 @@
       state.rows = [];
       state.nextId = 1;
       saved.rows.forEach(r => { if (r && r.name) state.rows.push(sanitizeRow(r, state.nextId++)); });
+    }
+    if (saved && Array.isArray(saved.companies)) {
+      state.companies = saved.companies.filter(c => c && c.name && c.url).map(c => sanitizeCompany(c, state.nextId++));
     }
   }
 
@@ -260,8 +286,30 @@
     ['concurrency', 'concurrency', 2, 1, 5], ['delayMs', 'delayMs', 300, 0, 60000],
     ['matchMin', 'matchMin', 75, 1, 100], ['reviewMin', 'reviewMin', 50, 1, 100], ['cacheDays', 'cacheDays', 30, 0, 365],
   ];
-  const XRAY_TEXT = [['xTitles', 'titles'], ['xLocations', 'locations'], ['xKeywords', 'keywords'], ['xExcludes', 'excludes'], ['xRaw', 'raw']];
-  const XRAY_NUM = [['xTarget', 'target', 300, 1, 1e6], ['xPages', 'maxPages', 5, 1, 10]];
+  // [element id, settings group, key]
+  const TEXT_FIELDS = [
+    ['xTitles', 'xray', 'titles'], ['xFunctions', 'xray', 'functions'], ['xCompanies', 'xray', 'companies'],
+    ['xLocations', 'xray', 'locations'], ['xKeywords', 'xray', 'keywords'], ['xExcludes', 'xray', 'excludes'],
+    ['xRaw', 'xray', 'raw'], ['xCountry', 'xray', 'country'],
+    ['cKeywords', 'company', 'keywords'], ['cLocations', 'company', 'locations'], ['cExcludes', 'company', 'excludes'],
+    ['cRaw', 'company', 'raw'], ['cCountry', 'company', 'country'],
+  ];
+  const GROUP_NUM = [['xTarget', 'xray', 'target', 300, 1, 1e6], ['xPages', 'xray', 'maxPages', 5, 1, 10],
+    ['cTarget', 'company', 'target', 100, 1, 1e5], ['cPages', 'company', 'maxPages', 5, 1, 10]];
+  const GROUP_CHECK = [['xCombine', 'xray', 'combineTitles'], ['xCurrentOnly', 'xray', 'currentOnly'],
+    ['xStrict', 'xray', 'strict'], ['cUnknownSize', 'company', 'unknownSize']];
+  // [container id, settings group, key] for groups of checkboxes stored as a list
+  const MULTI_CHECK = [['xSeniority', 'xray', 'seniority'], ['cSizes', 'company', 'sizes']];
+
+  function buildStaticOptions() {
+    document.querySelectorAll('select.country').forEach(sel => {
+      sel.appendChild(el('option', { value: '', text: 'Any country' }));
+      C.COUNTRIES.forEach(([code, name]) => sel.appendChild(el('option', { value: code, text: name })));
+    });
+    C.SIZE_BUCKETS.forEach(([k]) => {
+      $('cSizes').appendChild(el('label', { className: 'check' }, [el('input', { type: 'checkbox', 'data-k': k }), ' ' + k]));
+    });
+  }
 
   function fillForm() {
     const s = state.settings;
@@ -271,9 +319,12 @@
     $('hl').value = s.hl;
     $('templates').value = s.templates;
     $('exportScope').value = s.exportScope;
-    XRAY_TEXT.forEach(([id, key]) => { $(id).value = s.xray[key]; });
-    XRAY_NUM.forEach(([id, key]) => { $(id).value = s.xray[key]; });
-    $('xCombine').checked = !!s.xray.combineTitles;
+    TEXT_FIELDS.forEach(([id, g, key]) => { $(id).value = s[g][key]; });
+    GROUP_NUM.forEach(([id, g, key]) => { $(id).value = s[g][key]; });
+    GROUP_CHECK.forEach(([id, g, key]) => { $(id).checked = !!s[g][key]; });
+    MULTI_CHECK.forEach(([id, g, key]) => {
+      $(id).querySelectorAll('input[data-k]').forEach(cb => { cb.checked = s[g][key].includes(cb.getAttribute('data-k')); });
+    });
   }
 
   function bindForm() {
@@ -306,13 +357,17 @@
       toast('Query templates reset.');
     });
     $('exportScope').addEventListener('change', () => { state.settings.exportScope = $('exportScope').value; scheduleSave(); });
-    XRAY_TEXT.forEach(([id, key]) => $(id).addEventListener('change', () => { state.settings.xray[key] = $(id).value; scheduleSave(); }));
-    XRAY_NUM.forEach(([id, key, def, min, max]) => $(id).addEventListener('change', () => {
-      state.settings.xray[key] = int($(id).value, def, min, max);
-      $(id).value = state.settings.xray[key];
+    TEXT_FIELDS.forEach(([id, g, key]) => $(id).addEventListener('change', () => { state.settings[g][key] = $(id).value; scheduleSave(); }));
+    GROUP_NUM.forEach(([id, g, key, def, min, max]) => $(id).addEventListener('change', () => {
+      state.settings[g][key] = int($(id).value, def, min, max);
+      $(id).value = state.settings[g][key];
       scheduleSave();
     }));
-    $('xCombine').addEventListener('change', () => { state.settings.xray.combineTitles = $('xCombine').checked; scheduleSave(); });
+    GROUP_CHECK.forEach(([id, g, key]) => $(id).addEventListener('change', () => { state.settings[g][key] = $(id).checked; scheduleSave(); }));
+    MULTI_CHECK.forEach(([id, g, key]) => $(id).addEventListener('change', () => {
+      state.settings[g][key] = Array.from($(id).querySelectorAll('input[data-k]')).filter(cb => cb.checked).map(cb => cb.getAttribute('data-k'));
+      scheduleSave();
+    }));
   }
 
   // ---------------------------------------------------------------- settings dialog
@@ -446,9 +501,10 @@
     while (run.paused && !run.stop) await sleep(200);
   }
 
-  async function doSearch(query, page, mode) {
+  async function doSearch(query, page, mode, extra) {
     const s = state.settings;
-    const resp = await api('/api/search', { query, page, mode, gl: s.gl, hl: s.hl, cacheDays: s.cacheDays });
+    const x = extra || {};
+    const resp = await api('/api/search', { query, page, mode, gl: x.gl || s.gl, hl: s.hl, cacheDays: s.cacheDays, meta: x.meta || {} });
     if (resp.ok) {
       if (!Array.isArray(resp.results)) resp.results = [];
       if (resp.cached) run.cached++;
@@ -645,68 +701,245 @@
       + (c.error ? ', ' + c.error + ' errors' : '') + '.');
   }
 
-  function xrayOptions() {
-    const x = state.settings.xray;
-    return { titles: x.titles, locations: x.locations, keywords: x.keywords, excludes: x.excludes, raw: x.raw, combineTitles: x.combineTitles };
-  }
+  function xrayOptions() { return Object.assign({}, state.settings.xray); }
+
+  function queryCountText(n) { return n + (n === 1 ? ' search' : ' searches'); }
 
   function previewXray() {
-    const qs = C.buildXrayQueries(xrayOptions());
+    const plan = C.buildLeadPlan(xrayOptions());
     const pre = $('xQueries');
-    if (!qs.length) { pre.hidden = true; setMsg('xMsg', 'Enter at least one job title, location, keyword or query.', 'bad'); return qs; }
-    pre.hidden = false;
-    pre.textContent = qs.join('\n');
+    if (!plan.length) {
+      pre.hidden = true;
+      setMsg('xMsg', 'Fill in at least one filter (designation, seniority, company, region, keyword) or write a query.', 'bad');
+      return plan;
+    }
     const x = state.settings.xray;
-    const maxResults = qs.length * x.maxPages * 10;
-    setMsg('xMsg', plural(qs.length, 'query') .replace('querys', 'queries') + ' · up to ' + qs.length * x.maxPages
-      + ' searches (credits) · up to about ' + maxResults + ' results'
-      + (maxResults < x.target ? ' – fewer than your target of ' + x.target + ', add more titles or locations' : ''),
-      maxResults < x.target ? 'bad' : '');
-    return qs;
+    pre.hidden = false;
+    pre.textContent = plan.map(p => p.query).join('\n');
+    const maxResults = plan.length * x.maxPages * 10;
+    let msg = queryCountText(plan.length) + ' · up to ' + plan.length * x.maxPages + ' credits · up to about ' + maxResults + ' results';
+    if (maxResults < x.target) msg += ' – fewer than your target of ' + x.target + ', add more designations, companies or regions';
+    if (C.normSpace(x.companies) && x.maxPages > 2) msg += ' · Tip: 1–2 pages per search is usually enough when searching by company';
+    if (plan.length >= 5000) msg += ' · Limited to the first 5000 searches';
+    setMsg('xMsg', msg, maxResults < x.target ? 'bad' : '');
+    return plan;
   }
 
   async function runXray() {
-    const queries = previewXray();
-    if (!queries.length || !preflight()) return;
+    const plan = previewXray();
+    if (!plan.length || !preflight()) return;
     const x = state.settings.xray;
-    const maxCredits = queries.length * x.maxPages;
+    const filters = xrayOptions();
+    const maxCredits = plan.length * x.maxPages;
     if (server.provider !== 'mock' && maxCredits > 50
-      && !window.confirm('Run ' + queries.length + ' Google queries to find up to ' + x.target + ' leads? This can use up to '
-        + maxCredits + ' search credits. It stops as soon as ' + x.target + ' leads are found.')) return;
+      && !window.confirm('Run ' + queryCountText(plan.length) + ' to find up to ' + x.target + ' leads? This can use up to '
+        + maxCredits + ' search credits. It stops as soon as ' + x.target + ' matching leads are found.')) return;
     const urls = new Set(state.rows.map(r => r.url).filter(Boolean));
     const keys = new Set(state.rows.map(r => C.leadKey(r)));
-    let found = 0;
+    let found = 0, review = 0, dropped = 0;
     startRun('xray', x.target);
-    await runPool(queries, async q => {
+    await runPool(plan, async item => {
       for (let page = 1; page <= x.maxPages; page++) {
         await waitIfPaused();
         if (run.stop || found >= x.target) return;
-        const resp = await doSearch(q, page, 'xray');
+        const resp = await doSearch(item.query, page, 'xray', { gl: x.country, meta: item.meta });
         if (!resp.ok) return;
+        let fresh = 0;
         for (const r of resp.results) {
           if (found >= x.target) break;
-          const p = C.parseProfileResult(r);
-          if (!p || !p.name || p.name.length > 80 || urls.has(p.url)) continue;
-          const lead = { name: p.name, title: p.title || p.headline, company: p.company, location: p.location, url: p.url };
+          const chk = C.checkLeadFilters(r, filters);
+          if (!chk) continue;
+          const p = chk.profile;
+          if (!p.name || p.name.length > 80 || urls.has(p.url)) continue;
+          const company = p.company || (chk.checks.company && chk.matchedCompany ? chk.matchedCompany : '');
+          const lead = { name: p.name, title: p.title || p.headline, company, location: p.location, url: p.url };
           const key = C.leadKey(lead);
           if (keys.has(key)) continue;
           urls.add(p.url);
           keys.add(key);
-          state.rows.push(newRow(lead, 'Custom search', {
-            status: 'Found', resultTitle: trunc(p.resultTitle, 300), snippet: trunc(p.snippet, 500), query: q,
+          fresh++;
+          if (x.strict && !chk.strictPass) { dropped++; continue; }
+          state.rows.push(newRow(lead, 'Lead search', {
+            status: chk.pass ? 'Found' : 'Review', match: chk.label,
+            note: chk.pass ? '' : 'Does not match every filter – please check',
+            resultTitle: trunc(p.resultTitle, 300), snippet: trunc(p.snippet, 500), query: item.query,
           }));
-          found++;
+          if (chk.pass) found++; else review++;
         }
         run.done = found;
         renderProgress();
         scheduleRender();
         scheduleSave();
-        if (!resp.hasMore || !resp.results.length) return;
+        // Stop paging this search when Google has nothing more, or a later page brings nobody new.
+        if (!resp.hasMore || !resp.results.length || (page > 1 && !fresh)) return;
       }
     }, state.settings.concurrency);
     run.done = found;
-    await finishRun('Found ' + plural(found, 'new lead') + (found < x.target && !run.stop
-      ? ' (Google had no more results for these queries – add more titles, locations or keywords to find more)' : '') + '.');
+    let summary = 'Found ' + plural(found, 'lead') + ' matching your filters';
+    if (review) summary += ' + ' + review + ' to review';
+    if (dropped) summary += ' (' + dropped + ' left out by strict mode)';
+    if (found < x.target && !run.stop) summary += ' – Google had no more results for these searches; add more designations, companies or regions to find more';
+    await finishRun(summary + '.');
+  }
+
+  // ---------------------------------------------------------------- company search
+
+  function companyOptions() { return Object.assign({}, state.settings.company); }
+
+  function previewCompanies() {
+    const plan = C.buildCompanyPlan(companyOptions());
+    const pre = $('cQueries');
+    if (!plan.length) {
+      pre.hidden = true;
+      setMsg('cMsg', 'Enter at least one industry/keyword or location, or write a query.', 'bad');
+      return plan;
+    }
+    const c = state.settings.company;
+    pre.hidden = false;
+    pre.textContent = plan.map(p => p.query).join('\n');
+    const maxResults = plan.length * c.maxPages * 10;
+    setMsg('cMsg', queryCountText(plan.length) + ' · up to ' + plan.length * c.maxPages + ' credits · up to about ' + maxResults
+      + ' companies' + (maxResults < c.target ? ' – fewer than your target of ' + c.target + ', add more keywords or locations' : ''),
+      maxResults < c.target ? 'bad' : '');
+    return plan;
+  }
+
+  function sizeAllowed(company, opts) {
+    if (!opts.sizes.length) return true;
+    if (!company.sizeBucket) return !!opts.unknownSize;
+    return opts.sizes.includes(company.sizeBucket);
+  }
+
+  async function runCompanySearch() {
+    const plan = previewCompanies();
+    if (!plan.length || !preflight()) return;
+    const c = companyOptions();
+    const maxCredits = plan.length * c.maxPages;
+    if (server.provider !== 'mock' && maxCredits > 50
+      && !window.confirm('Run ' + queryCountText(plan.length) + ' to find up to ' + c.target + ' companies? This can use up to '
+        + maxCredits + ' search credits. It stops as soon as ' + c.target + ' companies are found.')) return;
+    const urls = new Set(state.companies.map(x => x.url));
+    const names = new Set(state.companies.map(x => C.fold(x.name)));
+    let found = 0, skippedSize = 0;
+    startRun('company', c.target);
+    await runPool(plan, async item => {
+      for (let page = 1; page <= c.maxPages; page++) {
+        await waitIfPaused();
+        if (run.stop || found >= c.target) return;
+        const resp = await doSearch(item.query, page, 'company', { gl: c.country, meta: item.meta });
+        if (!resp.ok) return;
+        let fresh = 0;
+        for (const r of resp.results) {
+          if (found >= c.target) break;
+          const co = C.parseCompanyResult(r);
+          if (!co || urls.has(co.url) || names.has(C.fold(co.name))) continue;
+          urls.add(co.url);
+          names.add(C.fold(co.name));
+          fresh++;
+          if (!sizeAllowed(co, c)) { skippedSize++; continue; }
+          state.companies.push(sanitizeCompany(Object.assign({}, co, {
+            snippet: trunc(co.snippet, 400), query: item.query, selected: true,
+          }), state.nextId++));
+          found++;
+        }
+        run.done = found;
+        renderProgress();
+        renderCompanies();
+        scheduleSave();
+        if (!resp.hasMore || !resp.results.length || (page > 1 && !fresh)) return;
+      }
+    }, state.settings.concurrency);
+    run.done = found;
+    let summary = 'Found ' + plural(found, 'new company').replace('companys', 'companies');
+    if (skippedSize) summary += ' (' + skippedSize + ' left out by the size filter)';
+    if (found < c.target && !run.stop) summary += ' – Google had no more results; add more keywords or locations to find more';
+    await finishRun(summary + '. Tick the ones you want and click “Find people at selected companies”.');
+    renderCompanies();
+  }
+
+  function renderCompanies() {
+    const list = state.companies;
+    const selected = list.filter(c => c.selected).length;
+    $('companyCount').textContent = list.length ? '(' + list.length + ' found, ' + selected + ' selected)' : '';
+    $('companyEmpty').hidden = list.length > 0;
+    $('cUseBtn').disabled = !selected || run.active;
+    $('cRun').disabled = run.active;
+    const size = 100;
+    const pages = Math.max(1, Math.ceil(list.length / size));
+    view.cpage = Math.min(Math.max(1, view.cpage), pages);
+    const start = (view.cpage - 1) * size;
+    const frag = document.createDocumentFragment();
+    list.slice(start, start + size).forEach(c => {
+      const href = safeHref(c.url);
+      frag.appendChild(el('tr', { 'data-cid': c.id }, [
+        el('td', null, [el('input', { type: 'checkbox', className: 'csel', checked: c.selected, 'aria-label': 'Select ' + c.name })]),
+        el('td', null, [el('b', { text: c.name }), c.website ? el('span', { className: 'sub', text: c.website }) : null]),
+        el('td', { text: c.industry }),
+        el('td', { text: c.size || '–' }),
+        el('td', { text: c.hq }),
+        el('td', { className: 'num', text: c.followers }),
+        el('td', null, [href ? el('a', { href, target: '_blank', rel: 'noopener noreferrer', text: href.replace('https://www.', '') }) : null]),
+        el('td', null, [el('button', { className: 'linkbtn', 'data-cact': 'delete', title: 'Remove', text: '✕' })]),
+      ]));
+    });
+    $('companyTbody').replaceChildren(frag);
+    const pager = $('companyPager');
+    pager.replaceChildren();
+    if (pages > 1) {
+      const prev = el('button', { className: 'btn small', text: '‹ Prev', disabled: view.cpage <= 1 });
+      const next = el('button', { className: 'btn small', text: 'Next ›', disabled: view.cpage >= pages });
+      prev.addEventListener('click', () => { view.cpage--; renderCompanies(); });
+      next.addEventListener('click', () => { view.cpage++; renderCompanies(); });
+      pager.append(prev, el('span', { text: 'Page ' + view.cpage + ' of ' + pages }), next);
+    }
+  }
+
+  function onCompanyClick(ev) {
+    const tr = ev.target.closest('tr[data-cid]');
+    if (!tr) return;
+    const c = state.companies.find(x => x.id === Number(tr.getAttribute('data-cid')));
+    if (!c) return;
+    if (ev.target.classList.contains('csel')) {
+      c.selected = ev.target.checked;
+    } else if (ev.target.closest('button[data-cact="delete"]')) {
+      state.companies.splice(state.companies.indexOf(c), 1);
+    } else {
+      return;
+    }
+    renderCompanies();
+    scheduleSave();
+  }
+
+  function useSelectedCompanies() {
+    const names = state.companies.filter(c => c.selected).map(c => c.name);
+    if (!names.length) { toast('Tick at least one company first.'); return; }
+    const x = state.settings.xray;
+    const merged = [];
+    const seen = new Set();
+    x.companies.split('\n').concat(names).map(C.normSpace).filter(Boolean).forEach(n => {
+      if (!seen.has(C.fold(n))) { seen.add(C.fold(n)); merged.push(n); }
+    });
+    x.companies = merged.join('\n');
+    x.currentOnly = true;
+    $('xCompanies').value = x.companies;
+    $('xCurrentOnly').checked = true;
+    showTab('xray');
+    scheduleSave();
+    $('xTitles').focus();
+    setMsg('xMsg', names.length + (names.length === 1 ? ' company' : ' companies')
+      + ' added. Now add designations or seniority (and regions if you like), then click Preview searches.', 'ok');
+  }
+
+  function exportCompanies(kind) {
+    if (!state.companies.length) { toast('No companies to export.'); return; }
+    const rows = state.companies.map((c, i) => Object.assign({}, c, { no: i + 1, size: c.size ? c.size + ' employees' : '' }));
+    if (kind === 'xlsx') {
+      download(C.toXLSX(COMPANY_COLUMNS, rows, 'Companies'), 'linkedin-companies_' + stamp() + '.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    } else {
+      download(C.toCSV(COMPANY_COLUMNS, rows), 'linkedin-companies_' + stamp() + '.csv', 'text/csv;charset=utf-8');
+    }
+    toast('Downloading ' + rows.length + ' companies. Check your Downloads folder.');
   }
 
   function countStatuses(rows) {
@@ -727,6 +960,8 @@
   function renderRunButtons() {
     $('runBtn').disabled = run.active;
     $('xRun').disabled = run.active;
+    $('cRun').disabled = run.active;
+    $('cUseBtn').disabled = run.active || !state.companies.some(c => c.selected);
     $('pauseBtn').disabled = !run.active;
     $('stopBtn').disabled = !run.active;
     $('pauseBtn').textContent = run.paused ? 'Resume' : 'Pause';
@@ -743,7 +978,7 @@
       const left = Math.round(((run.total - run.done) * secs) / run.done);
       eta = ' · about ' + (left > 90 ? Math.round(left / 60) + ' min' : left + ' s') + ' left';
     }
-    const what = run.kind === 'xray' ? 'leads found' : 'leads searched';
+    const what = run.kind === 'xray' ? 'matching leads found' : run.kind === 'company' ? 'companies found' : 'leads searched';
     setMsg('progressText', (run.paused ? 'Paused · ' : '') + run.done + ' / ' + run.total + ' ' + what + ' · '
       + run.credits + ' credits used' + (run.cached ? ' · ' + run.cached + ' cached' : '')
       + (run.errors ? ' · ' + plural(run.errors, 'error') : '') + eta);
@@ -774,7 +1009,10 @@
     return e;
   }
 
-  function hasScore(r) { return r.status === 'Matched' || r.status === 'Review' || r.status === 'Not found'; }
+  // A score only exists after a profile search (not for Lead search finds or manual URLs).
+  function hasScore(r) {
+    return (r.status === 'Matched' || r.status === 'Review' || r.status === 'Not found') && (r.confidence > 0 || r.candidates.length > 0);
+  }
 
   function statusBadge(r) {
     const g = GROUP[r.status] || 'pending';
@@ -797,7 +1035,8 @@
       el('input', { type: 'text', className: 'url', value: r.url, placeholder: 'paste URL if you find it yourself', 'aria-label': 'LinkedIn URL for ' + r.name }),
       href ? el('a', { href, target: '_blank', rel: 'noopener noreferrer', title: 'Open profile', text: '↗' }) : null,
     ])]));
-    tr.appendChild(el('td', null, [statusBadge(r), r.error ? el('span', { className: 'err', text: r.error }) : null]));
+    tr.appendChild(el('td', null, [statusBadge(r), r.error ? el('span', { className: 'err', text: r.error }) : null,
+      r.match ? el('span', { className: 'match', text: r.match }) : null]));
     tr.appendChild(el('td', { className: 'num', text: hasScore(r) ? String(r.confidence) : '' }));
     const q = r.query || C.buildFindQueries(r, state.settings.templates)[0] || '';
     tr.appendChild(el('td', { className: 'actions' }, [
@@ -847,7 +1086,7 @@
     });
     tbody.replaceChildren(frag);
     $('emptyMsg').hidden = rows.length > 0;
-    $('emptyMsg').textContent = state.rows.length ? 'No rows match this filter.' : 'No leads yet. Paste a Sales Navigator page above, or use Custom lead search.';
+    $('emptyMsg').textContent = state.rows.length ? 'No rows match this filter.' : 'No leads yet. Paste a Sales Navigator page above, or use Lead search / Company search.';
 
     const pager = $('pager');
     pager.replaceChildren();
@@ -1037,11 +1276,23 @@
   // ---------------------------------------------------------------- wiring
 
   function bindEvents() {
-    document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
-      $('tab-paste').hidden = t.dataset.tab !== 'paste';
-      $('tab-xray').hidden = t.dataset.tab !== 'xray';
-    }));
+    document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => showTab(t.dataset.tab)));
+    $('cPreview').addEventListener('click', previewCompanies);
+    $('cRun').addEventListener('click', runCompanySearch);
+    $('companyTbody').addEventListener('click', onCompanyClick);
+    $('cSelectAll').addEventListener('click', () => { state.companies.forEach(c => { c.selected = true; }); renderCompanies(); scheduleSave(); });
+    $('cSelectNone').addEventListener('click', () => { state.companies.forEach(c => { c.selected = false; }); renderCompanies(); scheduleSave(); });
+    $('cUseBtn').addEventListener('click', useSelectedCompanies);
+    $('cXlsxBtn').addEventListener('click', () => exportCompanies('xlsx'));
+    $('cCsvBtn').addEventListener('click', () => exportCompanies('csv'));
+    $('cClearBtn').addEventListener('click', () => {
+      if (run.active || !state.companies.length) return;
+      if (!window.confirm('Remove all ' + state.companies.length + ' companies from the list?')) return;
+      state.companies = [];
+      view.cpage = 1;
+      renderCompanies();
+      saveNow();
+    });
     $('parseBtn').addEventListener('click', parsePaste);
     $('csvFile').addEventListener('change', importFile);
     $('demoBtn').addEventListener('click', () => {
@@ -1119,13 +1370,20 @@
     });
   }
 
+  function showTab(name) {
+    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
+    ['paste', 'xray', 'company'].forEach(n => { $('tab-' + n).hidden = n !== name; });
+  }
+
   async function init() {
+    buildStaticOptions();
     bindEvents();
     await refreshServer();
     await loadState();
     fillForm();
     bindForm();
     renderAll();
+    renderCompanies();
     if (server.ok && !keyReady()) {
       showBanner('warn', 'Welcome! Open Settings to paste your SerpApi or Serper API key, or pick “Mock test mode” to try everything for free.');
     }

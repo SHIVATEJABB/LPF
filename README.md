@@ -3,7 +3,8 @@
 Paste leads copied from LinkedIn Sales Navigator. The tool cleans the text, searches Google for each
 person's LinkedIn profile (`site:linkedin.com/in/ "Name" "Company"`), checks that each result is the right
 person, and gives you a sheet you can download as Excel or CSV.
-It can also find **new** people with your own job title, location and keyword searches.
+It can also find **new** people with Sales Navigator-style filters (designation, seniority, company, region…),
+and find **companies** by industry, location and size, then the right people at those companies.
 
 The tool runs on your own computer. It never logs in to LinkedIn and never opens LinkedIn pages; it only
 reads Google results through a search API (SerpApi or Serper).
@@ -80,29 +81,58 @@ that is missing one of its fields (for example, no company).
 
 Two leads that end up with the same URL are flagged in the Notes column.
 
-## 4. Custom lead search (find new people)
+## 4. Lead search (find new people with filters)
 
-Open the **Custom lead search** tab and enter job titles, locations and (optionally) keywords and words to exclude.
-Every title is searched with every location, e.g. `site:linkedin.com/in/ "Head of Operations" "Chennai"`.
-Set **How many leads do you want?** (e.g. 300 or 3000); the search stops when it gets there.
-Google returns at most about 10 pages per query, so for big numbers add more titles, locations or keywords.
-Click **Preview queries** to see the queries and the maximum number of credits before you run them.
-Advanced users can type their own Google queries.
+Open the **Lead search (filters)** tab. Fill in only what you need:
 
-## 5. Costs
+| Filter | Example | How it is used |
+|---|---|---|
+| **Designations / job titles** | `Head of Sales` | Searched as written, and checked in the person's headline. |
+| **Seniority** | ☑ Director, ☑ VP | Adds those titles (Director; Vice President, VP…). |
+| **Department / function** | `Sales` | Must appear in the headline. |
+| **Companies** | `Zoho` | Searched, and checked against the person's company. |
+| **Regions / cities** | `Chennai` | Searched, and checked against the profile location. |
+| **Country** | India | Google country; used as the region when no cities are given. |
+| **Industry / keywords** | `SaaS` | Extra search words. |
+| **Exclude words** | `intern, student` | Results containing these words are skipped. |
+
+Every value is combined with every other into separate Google searches, e.g.
+`site:linkedin.com/in/ "Head of Sales" "Zoho" "Chennai"`. Google shows at most ~100 results per search, so the tool
+moves on to the next search when one runs out. More designations, companies or regions give more leads.
+
+Each profile found is checked against your filters. The **Filter Match** column shows e.g.
+`Title ✓ · Company ✓ · Location ?` (`?` = Google doesn't show it). Profiles that fail a filter are added as **Review**.
+
+- **Current company only:** ignores people who only *used to* work at the company.
+- **Strict:** keeps only people who match every filter (cleaner, fewer leads).
+- **How many leads do you want?:** counts matching leads only; the search stops when it gets there.
+- Click **Preview searches** to see every search and the maximum credits before you run them.
+
+## 5. Company search (find companies, then their people)
+
+1. Open the **Company search** tab. Enter industries/keywords (e.g. `roofing`), locations (e.g. `Dallas`), and optionally
+   tick company sizes. Size is only known when Google shows it; tick *Keep companies whose size Google doesn't show* to keep the rest.
+2. Click **Find companies**. You get a company list with industry, size, headquarters, followers and LinkedIn page.
+   **Download companies (Excel)** saves it.
+3. Tick the companies you want and click **Find people at selected companies →**. They are copied into Lead search, with
+   *Current company only* switched on.
+4. Add designations or seniority (and regions if you like), click **Preview searches**, then **Find leads**.
+   With many companies, 1–2 Google pages per search is usually enough and saves credits.
+
+## 6. Costs
 
 - One Google page (10 results) = **1 search credit**. A typical lead uses 1–2 credits.
 - The tool shows an estimate before you start and asks before any run that could use more than 50 credits.
 - Results are cached on your computer for 30 days (changeable), so searching the same thing again is free.
 - If the key is wrong or the credits run out, the run **stops at once** so nothing else is wasted.
 
-## 6. Your data
+## 7. Your data
 
 Everything stays in the `data` folder next to the tool: `config.json` (your API key), `session.json` (your sheet,
 saved automatically) and `cache.sqlite3` (cached results). Closing the browser does not lose your sheet. To start fresh,
 click **Clear sheet**, or delete the `data` folder.
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Problem | Fix |
 |---|---|
@@ -116,7 +146,7 @@ click **Clear sheet**, or delete the `data` folder.
 | Download does nothing | Look in your Downloads folder and the browser's download bar. Or use **Copy table for Google Sheets** and paste. |
 | Port already in use | Another copy is running. The tool picks the next free port automatically; use the address shown in the black window. |
 
-## 8. Good to know
+## 9. Good to know
 
 - Google does not show every LinkedIn profile, and its snippets can be out of date. That is why results are scored and
   uncertain ones are marked **Review** instead of being guessed.

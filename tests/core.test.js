@@ -276,3 +276,56 @@ test('crc32 and column names', () => {
   assert.equal(C.crc32(new TextEncoder().encode('hello')), 0x3610a686);
   assert.deepEqual([0, 25, 26, 27, 701, 702].map(C.colName), ['A', 'Z', 'AA', 'AB', 'ZZ', 'AAA']);
 });
+
+test('lead search plan: designation x seniority x company x region, country fallback, cap', () => {
+  const plan = C.buildLeadPlan({ titles: 'Head of Sales', seniority: ['vp'], companies: 'Zoho Corporation Pvt. Ltd.\nFreshworks', locations: 'Chennai', excludes: 'intern' });
+  assert.deepEqual(plan.map(p => p.query), [
+    'site:linkedin.com/in/ "Head of Sales" "Zoho" "Chennai" -"intern"',
+    'site:linkedin.com/in/ "Head of Sales" "Freshworks" "Chennai" -"intern"',
+    'site:linkedin.com/in/ "Vice President" "Zoho" "Chennai" -"intern"',
+    'site:linkedin.com/in/ "Vice President" "Freshworks" "Chennai" -"intern"',
+    'site:linkedin.com/in/ "VP" "Zoho" "Chennai" -"intern"',
+    'site:linkedin.com/in/ "VP" "Freshworks" "Chennai" -"intern"',
+  ]);
+  assert.deepEqual(plan[1].meta, { title: 'Head of Sales', company: 'Freshworks', location: 'Chennai' });
+  assert.deepEqual(C.buildLeadPlan({ titles: 'CEO', country: 'in' }).map(p => p.query), ['site:linkedin.com/in/ "CEO" "India"']);
+  assert.deepEqual(C.buildLeadPlan({ functions: 'Sales', seniority: ['head'] }).map(p => p.query), ['site:linkedin.com/in/ "Head" "Sales"']);
+  const many = Array.from({ length: 100 }, (_, i) => 'X' + i).join('\n');
+  assert.equal(C.buildLeadPlan({ titles: many, companies: many }).length, 5000);
+  assert.equal(C.buildLeadPlan({}).length, 0);
+});
+
+test('filter check: current company, past company, title, region, strict', () => {
+  const now = { title: 'Priya Raman - Head of Sales - Zoho | LinkedIn', link: 'https://in.linkedin.com/in/priya-r',
+    snippet: 'Head of Sales at Zoho · Experience: Zoho Corporation · Location: Chennai · 500+ connections' };
+  const past = { title: 'Arun K - Product Manager - Infosys | LinkedIn', link: 'https://in.linkedin.com/in/arun',
+    snippet: 'Product Manager at Infosys · Experience: Infosys · Previously Head of Sales at Zoho. Location: Bengaluru' };
+  const unknownLoc = { title: 'Meera Iyer - VP Sales - Zoho | LinkedIn', link: 'https://in.linkedin.com/in/meera', snippet: '' };
+  const f = { titles: 'Head of Sales', seniority: ['vp'], companies: 'Zoho Corporation Pvt. Ltd.', locations: 'Chennai', currentOnly: true };
+  const a = C.checkLeadFilters(now, f);
+  assert.deepEqual([a.label, a.pass, a.strictPass], ['Title ✓ · Company ✓ · Location ✓', true, true]);
+  const b = C.checkLeadFilters(past, f);
+  assert.equal(b.checks.company, false);
+  assert.equal(b.pass, false);
+  assert.equal(C.checkLeadFilters(past, Object.assign({}, f, { currentOnly: false })).checks.company, true);
+  const c = C.checkLeadFilters(unknownLoc, f);
+  assert.deepEqual([c.label, c.pass, c.strictPass], ['Title ✓ · Company ✓ · Location ?', true, false]);
+  assert.equal(C.checkLeadFilters({ title: 'x', link: 'https://www.linkedin.com/company/zoho' }, f), null);
+  const d = C.checkLeadFilters(now, { functions: 'Marketing' });
+  assert.deepEqual([d.label, d.pass], ['Department ✗', false]);
+  assert.equal(C.checkLeadFilters(now, { country: 'in' }).checks.location, false); // "Chennai" alone does not say India
+  assert.equal(C.checkLeadFilters(Object.assign({}, now, { snippet: 'Location: Chennai, Tamil Nadu, India' }), { country: 'in' }).checks.location, true);
+});
+
+test('company search: queries, result parsing, size buckets', () => {
+  assert.deepEqual(C.buildCompanyPlan({ keywords: 'roofing\nsolar', locations: 'Dallas', excludes: 'jobs' }).map(p => p.query), [
+    'site:linkedin.com/company/ "roofing" "Dallas" -"jobs"', 'site:linkedin.com/company/ "solar" "Dallas" -"jobs"']);
+  assert.deepEqual(C.buildCompanyPlan({ keywords: 'fintech', country: 'sg' }).map(p => p.query), ['site:linkedin.com/company/ "fintech" "Singapore"']);
+  const co = C.parseCompanyResult({ title: 'ABC Roofing | LinkedIn', link: 'https://www.linkedin.com/company/abc-roofing/about/?x=1',
+    snippet: 'ABC Roofing | 1,245 followers on LinkedIn. Quality roofs. | Industry: Construction · Company size: 11-50 employees · Headquarters: Dallas, Texas · Website: http://abcroofing.com' });
+  assert.deepEqual([co.url, co.name, co.followers, co.size, co.sizeBucket, co.industry, co.hq, co.website],
+    ['https://www.linkedin.com/company/abc-roofing', 'ABC Roofing', '1,245', '11-50', '11-50', 'Construction', 'Dallas, Texas', 'http://abcroofing.com']);
+  assert.equal(C.parseCompanyResult({ title: 'Jane - X | LinkedIn', link: 'https://www.linkedin.com/in/jane' }), null);
+  assert.equal(C.parseCompanyResult({ title: 'LinkedIn', link: 'https://uk.linkedin.com/company/acme-widgets' }).name, 'Acme Widgets');
+  assert.deepEqual(['2-10', '10,001+', '1,234', '51-200 employees', ''].map(C.sizeBucket), ['1-10', '10001+', '1001-5000', '51-200', '']);
+});

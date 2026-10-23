@@ -266,6 +266,14 @@ class ServerTest(unittest.TestCase):
         profiles = [x for x in r["results"] if "/in/" in x["link"]]
         self.assertEqual(len(profiles), 10)
         self.assertTrue(all("/in/mock-" in x["link"] for x in profiles))
+        s, r = self.post("/api/search", {"query": 'site:linkedin.com/company/ "roofing" "Dallas"', "mode": "company",
+                                         "meta": {"keyword": "roofing", "location": "Dallas"}})
+        self.assertTrue(r["ok"])
+        companies = [x for x in r["results"] if "/company/" in x["link"]]
+        self.assertEqual(len(companies), 10)
+        self.assertTrue(all("Dallas" in x["snippet"] for x in companies))
+        s, r = self.post("/api/search", {"query": 'x', "mode": "xray", "meta": {"title": "CFO", "company": "Acme"}})
+        self.assertIn("CFO - Acme", r["results"][0]["title"])
         s, r = self.post("/api/search", {"query": 'site:linkedin.com/in/ "Sumit Kumar" "INOCYX"', "mode": "find"})
         self.assertTrue(r["ok"])
         s, r = self.post("/api/test", {})

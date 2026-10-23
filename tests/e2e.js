@@ -191,11 +191,73 @@ function readXlsx(file) {
     assert.equal(await page.isDisabled('#runBtn'), false);
     step('Stop button halts a running search');
 
+    // 7b. Company search -> pick companies -> people at those companies (strict, current company).
+    await page.click('.tab[data-tab="company"]');
+    await page.fill('#cKeywords', 'roofing');
+    await page.dispatchEvent('#cKeywords', 'change');
+    await page.fill('#cLocations', 'Dallas');
+    await page.dispatchEvent('#cLocations', 'change');
+    await page.check('#cSizes input[data-k="11-50"]');
+    await page.check('#cSizes input[data-k="51-200"]');
+    await page.fill('#cTarget', '15');
+    await page.dispatchEvent('#cTarget', 'change');
+    await page.click('#cRun');
+    await waitFor(async () => /Finished/.test(await page.textContent('#progressText')), 60000, 'company search');
+    const cos = await page.evaluate(() => window.__llf.state.companies.map(c => ({ name: c.name, b: c.sizeBucket, url: c.url })));
+    assert.equal(cos.length, 15);
+    assert.ok(cos.every(c => ['11-50', '51-200', ''].includes(c.b)), JSON.stringify(cos.map(c => c.b)));
+    assert.ok(cos.every(c => c.url.startsWith('https://www.linkedin.com/company/')));
+    assert.equal(await page.locator('#companyTbody tr').count(), 15);
+    step('company search found 15 companies, size filter respected');
+
+    const [cdl2] = await Promise.all([page.waitForEvent('download'), page.click('#cXlsxBtn')]);
+    const cofile = path.join(dlDir, 'companies.xlsx');
+    await cdl2.saveAs(cofile);
+    const cosheet = readXlsx(cofile);
+    assert.equal(cosheet.length, 16);
+    assert.equal(cosheet[0][1], 'Company');
+    step('company list downloads as Excel');
+
+    await page.click('#cSelectNone');
+    const boxes = page.locator('#companyTbody input.csel');
+    for (let i = 0; i < 3; i++) await boxes.nth(i).check();
+    await page.click('#cUseBtn');
+    assert.equal(await page.isVisible('#tab-xray'), true);
+    const picked = (await page.inputValue('#xCompanies')).split('\n');
+    assert.deepEqual(picked, cos.slice(0, 3).map(c => c.name));
+    assert.equal(await page.isChecked('#xCurrentOnly'), true);
+    step('3 selected companies copied into Lead search');
+
+    await page.fill('#xTitles', 'Head of Sales');
+    await page.dispatchEvent('#xTitles', 'change');
+    await page.check('#xSeniority input[data-k="vp"]');
+    await page.fill('#xLocations', 'Dallas');
+    await page.dispatchEvent('#xLocations', 'change');
+    await page.check('#xStrict');
+    await page.fill('#xPages', '2');
+    await page.dispatchEvent('#xPages', 'change');
+    await page.fill('#xTarget', '20');
+    await page.dispatchEvent('#xTarget', 'change');
+    await page.click('#xPreview');
+    assert.equal((await page.textContent('#xQueries')).trim().split('\n').length, 9); // 3 titles x 3 companies x 1 region
+    const before7b = await page.evaluate(() => window.__llf.state.rows.length);
+    await page.click('#xRun');
+    await waitFor(async () => /Finished/.test(await page.textContent('#progressText')), 60000, 'company people search');
+    const people = await page.evaluate(n => window.__llf.state.rows.slice(n), before7b);
+    assert.equal(people.length, 20);
+    const names = cos.slice(0, 3).map(c => c.name);
+    assert.ok(people.every(r => r.status === 'Found' && r.source === 'Lead search'), JSON.stringify(people.map(r => r.status)));
+    assert.ok(people.every(r => names.includes(r.company)), JSON.stringify(people.map(r => r.company)));
+    assert.ok(people.every(r => r.match === 'Title ✓ · Company ✓ · Location ✓'), people[0].match);
+    assert.match(await page.textContent('#progressText'), /left out by strict mode/);
+    step('people search at those companies: 20 leads, all match every filter (strict mode)');
+
     // 8. Reload keeps everything.
     const before = await page.evaluate(() => window.__llf.state.rows.length);
     await page.evaluate(() => new Promise(r => setTimeout(r, 2500)));
     await page.reload();
-    await waitFor(() => page.evaluate(n => window.__llf && window.__llf.state.rows.length === n, before), 8000, 'restored rows');
+    await waitFor(() => page.evaluate(n => window.__llf && window.__llf.state.rows.length === n
+      && window.__llf.state.companies.length === 15, before), 8000, 'restored rows and companies');
     step('after reload all ' + before + ' rows are restored');
 
     // 9. A rejected API key stops the run straight away (no wasted credits).

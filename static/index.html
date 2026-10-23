@@ -26,7 +26,8 @@
     <section class="card">
       <div class="tabs" role="tablist">
         <button class="tab active" data-tab="paste" role="tab">1. Paste from Sales Navigator</button>
-        <button class="tab" data-tab="xray" role="tab">Custom lead search (find new people)</button>
+        <button class="tab" data-tab="xray" role="tab">Lead search (filters)</button>
+        <button class="tab" data-tab="company" role="tab">Company search</button>
       </div>
 
       <div class="tabpane" id="tab-paste">
@@ -44,37 +45,117 @@
       </div>
 
       <div class="tabpane" id="tab-xray" hidden>
-        <p class="hint">Find people who are not in your list yet. Every job title is searched with every location
-          (and keyword) as a separate Google query, for example
-          <code>site:linkedin.com/in/ "Head of Operations" "Chennai"</code>. Found profiles are added to the sheet below.
-          Google returns at most about 10 pages per query, so add more titles or locations to get more leads.</p>
+        <p class="hint">Find new people with filters, like Sales Navigator. Every filter value is combined with every other
+          into separate Google searches, e.g. <code>site:linkedin.com/in/ "Head of Sales" "Zoho" "Chennai"</code>.
+          Each profile found is checked against your filters. Google shows at most ~100 results per search, so more
+          designations, companies or regions give more leads. All boxes are optional – fill in what you need.</p>
         <div class="grid3">
-          <label>Job titles <small>one per line</small>
-            <textarea id="xTitles" spellcheck="false" placeholder="Head of Operations&#10;Founder&#10;CEO"></textarea></label>
-          <label>Locations <small>one per line, optional</small>
-            <textarea id="xLocations" spellcheck="false" placeholder="Chennai&#10;Bengaluru"></textarea></label>
-          <label>Keywords, industry or company <small>optional</small>
-            <textarea id="xKeywords" spellcheck="false" placeholder="roofing&#10;healthcare"></textarea></label>
+          <label>Designations / job titles <small>one per line</small>
+            <textarea id="xTitles" spellcheck="false" placeholder="Head of Operations&#10;Sales Director&#10;Founder"></textarea></label>
+          <label>Department / function <small>must be in the headline, one per line</small>
+            <textarea id="xFunctions" spellcheck="false" placeholder="Sales&#10;Marketing"></textarea></label>
+          <div class="field">
+            <span class="field-label">Seniority <small>adds these titles</small></span>
+            <div class="checks" id="xSeniority">
+              <label class="check"><input type="checkbox" data-k="owner"> Owner / Founder</label>
+              <label class="check"><input type="checkbox" data-k="cxo"> CXO (CEO, CFO…)</label>
+              <label class="check"><input type="checkbox" data-k="vp"> Vice President</label>
+              <label class="check"><input type="checkbox" data-k="director"> Director</label>
+              <label class="check"><input type="checkbox" data-k="head"> Head</label>
+              <label class="check"><input type="checkbox" data-k="manager"> Manager</label>
+            </div>
+          </div>
         </div>
         <div class="grid3">
+          <label>Companies <small>one per line – or pick them in Company search</small>
+            <textarea id="xCompanies" spellcheck="false" placeholder="Zoho&#10;Freshworks"></textarea></label>
+          <label>Regions / cities <small>one per line</small>
+            <textarea id="xLocations" spellcheck="false" placeholder="Chennai&#10;Bengaluru"></textarea></label>
+          <label>Industry / keywords <small>optional, one per line</small>
+            <textarea id="xKeywords" spellcheck="false" placeholder="SaaS&#10;healthcare"></textarea></label>
+        </div>
+        <div class="grid4">
+          <label>Country <small>Google country; used as region if no cities</small>
+            <select id="xCountry" class="country"></select></label>
           <label>Exclude words <small>comma separated</small>
             <input id="xExcludes" type="text" placeholder="intern, student, jobs"></label>
-          <label>How many leads do you want?
+          <label>How many leads do you want? <small>matching leads</small>
             <input id="xTarget" type="number" min="1" step="1" inputmode="numeric"></label>
-          <label>Google pages per query <small>10 results per page</small>
+          <label>Google pages per search <small>10 results per page</small>
             <input id="xPages" type="number" min="1" max="10" step="1" inputmode="numeric"></label>
         </div>
-        <label class="check"><input type="checkbox" id="xCombine"> Put all job titles in one query with OR (fewer searches, fewer results)</label>
+        <label class="check"><input type="checkbox" id="xCurrentOnly"><span>Current company only (ignore people who only <i>used to</i> work there)</span></label>
+        <label class="check"><input type="checkbox" id="xStrict"> Strict: only keep people who match every filter (cleaner, fewer leads)</label>
+        <label class="check"><input type="checkbox" id="xCombine"> Put all designations in one search with OR (fewer searches, fewer results)</label>
         <details class="adv">
           <summary>Advanced: write your own Google queries (one per line)</summary>
           <textarea id="xRaw" spellcheck="false" placeholder='site:linkedin.com/in/ "CFO" "roofing" "Texas"&#10;site:linkedin.com/in/ ("owner" OR "president") "roofing" "Dallas"'></textarea>
         </details>
         <div class="row">
-          <button id="xPreview" class="btn">Preview queries</button>
+          <button id="xPreview" class="btn">Preview searches</button>
           <button id="xRun" class="btn primary">Find leads</button>
           <span id="xMsg" class="msg"></span>
         </div>
         <pre id="xQueries" class="queries" hidden></pre>
+      </div>
+
+      <div class="tabpane" id="tab-company" hidden>
+        <p class="hint">Find companies first, then search for people who work there. Searches LinkedIn company pages on Google,
+          e.g. <code>site:linkedin.com/company/ "roofing" "Dallas"</code>. Tick the companies you want and click
+          <b>Find people at selected companies</b>.</p>
+        <div class="grid3">
+          <label>Industry / keywords <small>one per line</small>
+            <textarea id="cKeywords" spellcheck="false" placeholder="roofing&#10;solar installation"></textarea></label>
+          <label>Locations <small>one per line, optional</small>
+            <textarea id="cLocations" spellcheck="false" placeholder="Dallas&#10;Houston"></textarea></label>
+          <div class="field">
+            <span class="field-label">Company size <small>employees – leave all unticked for any size</small></span>
+            <div class="checks" id="cSizes"></div>
+            <label class="check"><input type="checkbox" id="cUnknownSize"> Keep companies whose size Google doesn't show</label>
+          </div>
+        </div>
+        <div class="grid4">
+          <label>Country<select id="cCountry" class="country"></select></label>
+          <label>Exclude words <small>comma separated</small>
+            <input id="cExcludes" type="text" placeholder="jobs, careers"></label>
+          <label>How many companies?
+            <input id="cTarget" type="number" min="1" step="1" inputmode="numeric"></label>
+          <label>Google pages per search
+            <input id="cPages" type="number" min="1" max="10" step="1" inputmode="numeric"></label>
+        </div>
+        <details class="adv">
+          <summary>Advanced: write your own Google queries (one per line)</summary>
+          <textarea id="cRaw" spellcheck="false" placeholder='site:linkedin.com/company/ "roofing" "Texas" "51-200 employees"'></textarea>
+        </details>
+        <div class="row">
+          <button id="cPreview" class="btn">Preview searches</button>
+          <button id="cRun" class="btn primary">Find companies</button>
+          <span id="cMsg" class="msg"></span>
+        </div>
+        <pre id="cQueries" class="queries" hidden></pre>
+
+        <div class="sheethead company-head">
+          <h2>Company list <span id="companyCount" class="muted"></span></h2>
+          <div class="row tight">
+            <button id="cSelectAll" class="btn small">Select all</button>
+            <button id="cSelectNone" class="btn small">Select none</button>
+            <button id="cUseBtn" class="btn small primary">Find people at selected companies →</button>
+          </div>
+        </div>
+        <div class="tablewrap">
+          <table class="companies">
+            <thead><tr><th class="num">✓</th><th>Company</th><th>Industry</th><th>Size</th><th>Headquarters</th>
+              <th class="num">Followers</th><th>LinkedIn page</th><th></th></tr></thead>
+            <tbody id="companyTbody"></tbody>
+          </table>
+          <div id="companyEmpty" class="empty">No companies yet. Fill in the filters above and click Find companies.</div>
+        </div>
+        <div class="pager" id="companyPager"></div>
+        <div class="export">
+          <button id="cXlsxBtn" class="btn">⬇ Download companies (Excel)</button>
+          <button id="cCsvBtn" class="btn ghost">⬇ CSV</button>
+          <button id="cClearBtn" class="btn danger ghost">Clear company list</button>
+        </div>
       </div>
     </section>
 

@@ -28,7 +28,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
 DATA_DIR = os.environ.get("LLF_DATA_DIR") or os.path.join(APP_DIR, "data")
@@ -311,8 +311,9 @@ def _slug(text):
     return s or "profile"
 
 
-def search_mock(query, page, mode):
+def search_mock(query, page, mode, meta=None):
     time.sleep(0.12)
+    meta = meta if isinstance(meta, dict) else {}
     phrases = re.findall(r'"([^"]+)"', query)
     noise = [
         {"title": "Posts | LinkedIn", "link": "https://www.linkedin.com/posts/mock-post-%d" % (_h(query) % 9999),
@@ -320,22 +321,48 @@ def search_mock(query, page, mode):
         {"title": "Mock Company | LinkedIn", "link": "https://www.linkedin.com/company/mock-company",
          "snippet": "Company page (should be ignored).", "extras": []},
     ]
+    if mode == "company":
+        if page > 5:
+            return [], False
+        keyword = str(meta.get("keyword") or (phrases[0] if phrases else "Business"))
+        place = str(meta.get("location") or (phrases[1] if len(phrases) > 1 else "Chennai, Tamil Nadu"))
+        sizes = ["2-10", "11-50", "51-200", "201-500", "1,001-5,000", ""]
+        out = []
+        for i in range(10):
+            h = _h("company|%s|%d|%d" % (query, page, i))
+            name = "Mock %s %s %d" % (keyword.title(), ["Solutions", "Group", "Works", "Labs", "Partners"][h % 5], h % 997)
+            size = sizes[h % len(sizes)]
+            out.append({
+                "title": "%s | LinkedIn" % name,
+                "link": "https://www.linkedin.com/company/%s" % _slug(name),
+                "snippet": "%s | %d followers on LinkedIn. A made-up %s company for testing. | Industry: %s%s · Headquarters: %s" % (
+                    name, h % 20000, keyword, keyword.title(),
+                    (" · Company size: %s employees" % size) if size else "", place),
+                "extras": [],
+            })
+        noise_person = {"title": "Someone - Mock | LinkedIn", "link": "https://www.linkedin.com/in/mock-person",
+                        "snippet": "A person page (should be ignored by company search).", "extras": []}
+        return out + [noise_person], page < 5
     if mode == "xray":
         if page > 5:
             return [], False
-        title = phrases[0] if phrases else "Professional"
-        place = phrases[1] if len(phrases) > 1 else "Chennai, Tamil Nadu, India"
+        title = str(meta.get("title") or (phrases[0] if phrases else "Professional"))
+        place = str(meta.get("location") or "Chennai, Tamil Nadu, India")
         out = []
         for i in range(10):
             h = _h("%s|%d|%d" % (query, page, i))
             name = "%s %s" % (MOCK_FIRST[h % len(MOCK_FIRST)], MOCK_LAST[(h // 7) % len(MOCK_LAST)])
-            company = "Mock %s Pvt Ltd" % ["Systems", "Labs", "Foods", "Logistics", "Health"][h % 5]
+            company = str(meta.get("company") or "Mock %s Pvt Ltd" % ["Systems", "Labs", "Foods", "Logistics", "Health"][h % 5])
+            ptitle, ploc = title, place
+            if i % 5 == 4:
+                # someone who only mentions the search words: other job, other company, other city
+                ptitle, company, ploc = "Software Engineer", "Other Mock Corp", "Pune, Maharashtra, India"
             out.append({
-                "title": "%s - %s - %s | LinkedIn" % (name, title, company),
+                "title": "%s - %s - %s | LinkedIn" % (name, ptitle, company),
                 "link": "https://in.linkedin.com/in/mock-%s-%x" % (_slug(name), h % 0xFFFFF),
                 "snippet": "%s at %s · Experience: %s · Location: %s · 500+ connections on LinkedIn." % (
-                    title, company, company, place),
-                "extras": [place, title, company],
+                    ptitle, company, company, ploc),
+                "extras": [ploc, ptitle, company],
             })
         return out + noise[:1], page < 5
     if not phrases or page > 1:
@@ -378,10 +405,10 @@ def run_search(cfg, payload):
         raise SearchError("Bad page or cacheDays value.")
     gl = re.sub(r"[^a-z]", "", str(payload.get("gl") or "").lower())[:2]
     hl = re.sub(r"[^a-zA-Z-]", "", str(payload.get("hl") or ""))[:8]
-    mode = "xray" if payload.get("mode") == "xray" else "find"
+    mode = payload.get("mode") if payload.get("mode") in ("xray", "company") else "find"
 
     if provider == "mock":
-        results, has_more = search_mock(query, page, mode)
+        results, has_more = search_mock(query, page, mode, payload.get("meta"))
         return {"ok": True, "results": results, "hasMore": has_more, "cached": False, "provider": "mock"}
 
     key = api_key(cfg, provider)

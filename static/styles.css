@@ -180,3 +180,14 @@ legend { font-weight: 700; padding: 0 6px; }
   transition: opacity .2s, transform .2s; max-width: calc(100vw - 32px); z-index: 50;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field-label { font-weight: 600; font-size: 13px; }
+.field-label small { font-weight: 400; color: var(--muted); }
+.checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 10px; }
+.checks label.check, .field label.check { margin: 2px 0; }
+.row.tight { margin-top: 0; }
+.company-head { margin: 18px 0 10px; }
+table.companies { min-width: 860px; }
+table.companies td:first-child, table.companies th:first-child { width: 36px; text-align: center; }
+.match { display: block; font-size: 12px; color: var(--muted); }

@@ -451,28 +451,218 @@
     return quote(t);
   }
 
-  // Custom lead search ("X-ray"): titles x locations x keywords, plus raw queries.
-  function buildXrayQueries(opts) {
-    const o = opts || {};
-    const site = normSpace(o.site) || 'site:linkedin.com/in/';
-    const titles = lines(o.titles), locations = lines(o.locations), keywords = lines(o.keywords);
-    const excludes = uniq(str(o.excludes).split(/[\n,]/).map(normSpace).filter(Boolean));
-    const exPart = excludes.map(e => '-' + quote(e)).join(' ');
-    const titleGroups = titles.length > 1 && o.combineTitles
-      ? ['(' + titles.map(quote).join(' OR ') + ')']
-      : titles.map(looseTerm);
-    const out = [];
-    if (titleGroups.length || locations.length || keywords.length) {
-      for (const t of (titleGroups.length ? titleGroups : [''])) {
-        for (const l of (locations.length ? locations.map(quote) : [''])) {
-          for (const k of (keywords.length ? keywords.map(looseTerm) : [''])) {
-            out.push(normSpace([site, t, l, k, exPart].join(' ')));
-          }
+  // ---------------------------------------------------------------- lead search & company search
+
+  // Seniority shortcuts: each ticked level adds these job titles to the lead search.
+  const SENIORITY = {
+    owner: ['Founder', 'Co-Founder', 'Owner'],
+    cxo: ['CEO', 'COO', 'CFO', 'CTO', 'CMO', 'CIO'],
+    vp: ['Vice President', 'VP'],
+    director: ['Director'],
+    head: ['Head'],
+    manager: ['Manager'],
+  };
+
+  // Google country codes (gl) used by SerpApi / Serper.
+  const COUNTRIES = [
+    ['in', 'India'], ['us', 'United States'], ['uk', 'United Kingdom'], ['ca', 'Canada'], ['au', 'Australia'],
+    ['ae', 'United Arab Emirates'], ['sg', 'Singapore'], ['sa', 'Saudi Arabia'], ['qa', 'Qatar'], ['de', 'Germany'],
+    ['fr', 'France'], ['nl', 'Netherlands'], ['ie', 'Ireland'], ['es', 'Spain'], ['it', 'Italy'], ['nz', 'New Zealand'],
+    ['za', 'South Africa'], ['ng', 'Nigeria'], ['ke', 'Kenya'], ['my', 'Malaysia'], ['ph', 'Philippines'],
+    ['id', 'Indonesia'], ['jp', 'Japan'], ['br', 'Brazil'], ['mx', 'Mexico'],
+  ];
+
+  function countryName(code) {
+    const c = COUNTRIES.find(x => x[0] === str(code).toLowerCase());
+    return c ? c[1] : '';
+  }
+
+  const MAX_QUERIES = 5000;
+
+  // Every combination of the term groups (first group outermost), capped at MAX_QUERIES.
+  function combine(groups, limit) {
+    let combos = [[]];
+    for (const g of groups) {
+      const opts = g.length ? g : [null];
+      const next = [];
+      for (const c of combos) {
+        for (const x of opts) {
+          if (next.length >= limit) break;
+          next.push(c.concat([x]));
         }
       }
+      combos = next;
     }
-    lines(o.raw).forEach(q => out.push(/\bsite:/i.test(q) ? q : normSpace(site + ' ' + q)));
+    return combos;
+  }
+
+  function leadTitleTerms(o) {
+    const out = lines(o.titles);
+    (Array.isArray(o.seniority) ? o.seniority : []).forEach(k => { (SENIORITY[k] || []).forEach(t => out.push(t)); });
     return uniq(out);
+  }
+
+  // Lead search ("X-ray"): designation x department x company x region x keyword, plus raw queries.
+  // Returns [{query, meta}] - meta says which filter values went into the query.
+  function buildLeadPlan(opts) {
+    const o = opts || {};
+    const site = normSpace(o.site) || 'site:linkedin.com/in/';
+    const titles = leadTitleTerms(o);
+    const functions = lines(o.functions), keywords = lines(o.keywords);
+    const companies = uniq(lines(o.companies).map(companyForQuery).filter(Boolean));
+    let locations = lines(o.locations);
+    if (!locations.length && countryName(o.country)) locations = [countryName(o.country)];
+    const excludes = uniq(str(o.excludes).split(/[\n,]/).map(normSpace).filter(Boolean));
+    const exPart = excludes.map(e => '-' + quote(e)).join(' ');
+    const titleGroup = titles.length > 1 && o.combineTitles
+      ? [{ term: '(' + titles.map(quote).join(' OR ') + ')', value: titles.join(' / ') }]
+      : titles.map(t => ({ term: looseTerm(t), value: t }));
+    const groups = [
+      titleGroup,
+      functions.map(f => ({ term: quote(f), value: f })),
+      companies.map(c => ({ term: quote(c), value: c })),
+      locations.map(l => ({ term: quote(l), value: l })),
+      keywords.map(k => ({ term: looseTerm(k), value: k })),
+    ];
+    const keys = ['title', 'func', 'company', 'location', 'keyword'];
+    const out = [];
+    if (groups.some(g => g.length)) {
+      combine(groups, MAX_QUERIES).forEach(c => {
+        const meta = {};
+        c.forEach((x, i) => { if (x) meta[keys[i]] = x.value; });
+        out.push({ query: normSpace([site].concat(c.map(x => (x ? x.term : '')), [exPart]).join(' ')), meta });
+      });
+    }
+    lines(o.raw).forEach(q => out.push({ query: /\bsite:/i.test(q) ? q : normSpace(site + ' ' + q), meta: {} }));
+    const seen = new Set();
+    return out.filter(x => (seen.has(x.query) ? false : (seen.add(x.query), true))).slice(0, MAX_QUERIES);
+  }
+
+  function buildXrayQueries(opts) { return buildLeadPlan(opts).map(x => x.query); }
+
+  // Company search: industry/keyword x location on LinkedIn company pages.
+  function buildCompanyPlan(opts) {
+    const o = opts || {};
+    const site = 'site:linkedin.com/company/';
+    const keywords = lines(o.keywords);
+    let locations = lines(o.locations);
+    if (!locations.length && countryName(o.country)) locations = [countryName(o.country)];
+    const excludes = uniq(str(o.excludes).split(/[\n,]/).map(normSpace).filter(Boolean));
+    const exPart = excludes.map(e => '-' + quote(e)).join(' ');
+    const groups = [keywords.map(k => ({ term: looseTerm(k), value: k })), locations.map(l => ({ term: quote(l), value: l }))];
+    const out = [];
+    if (groups.some(g => g.length)) {
+      combine(groups, MAX_QUERIES).forEach(c => {
+        out.push({ query: normSpace([site].concat(c.map(x => (x ? x.term : '')), [exPart]).join(' ')),
+          meta: { keyword: c[0] ? c[0].value : '', location: c[1] ? c[1].value : '' } });
+      });
+    }
+    lines(o.raw).forEach(q => out.push({ query: /\bsite:/i.test(q) ? q : normSpace(site + ' ' + q), meta: {} }));
+    const seen = new Set();
+    return out.filter(x => (seen.has(x.query) ? false : (seen.add(x.query), true))).slice(0, MAX_QUERIES);
+  }
+
+  function hasAllWords(term, set) {
+    const w = words(term).filter(x => !STOP.has(x));
+    return w.length > 0 && w.every(x => set.has(x) || (!!ABBR[x] && ABBR[x].split(' ').every(y => set.has(y))));
+  }
+
+  // Checks one Google result against the lead search filters.
+  // Each check is true (matches), false (does not match) or null (Google does not show it).
+  function checkLeadFilters(res, opts) {
+    const p = parseProfileResult(res);
+    if (!p) return null;
+    const o = opts || {};
+    const extras = Array.isArray(res.extras) ? res.extras : [];
+    const snippetLead = normSpace(str(res.snippet).split(/\s*[·•]\s*/)[0]);
+    const headline = new Set(expandWords(words([p.headline, p.title, snippetLead].join(' '))));
+    const checks = { title: null, func: null, company: null, location: null };
+    let matchedCompany = '';
+    const titles = leadTitleTerms(o);
+    if (titles.length) checks.title = titles.some(t => hasAllWords(t, headline));
+    const functions = lines(o.functions);
+    if (functions.length) checks.func = functions.some(t => hasAllWords(t, headline));
+    const companies = lines(o.companies);
+    if (companies.length) {
+      // "Current company only" looks at the headline and the Experience field, not the whole snippet.
+      const text = o.currentOnly
+        ? [p.headline, p.company, snippetLead].concat(extras).join(' ')
+        : [res.title, res.snippet].concat(extras).join(' ');
+      const list = expandWords(words(text));
+      const set = new Set(list), hay = ' ' + list.join(' ') + ' ';
+      checks.company = false;
+      for (const c of companies) {
+        const sc = companySimilarity(c, hay, set);
+        if (sc != null && sc >= 0.6) { checks.company = true; matchedCompany = c; break; }
+      }
+    }
+    const regions = lines(o.locations);
+    const targets = (regions.length ? regions.map(cityOf) : [countryName(o.country)]).map(x => words(x).join(' ')).filter(Boolean);
+    if (targets.length) {
+      if (p.location) {
+        const loc = wordString(p.location);
+        checks.location = targets.some(t => loc.includes(' ' + t + ' '));
+      } else {
+        const hay = wordString([res.title, res.snippet].concat(extras).join(' '));
+        checks.location = targets.some(t => hay.includes(' ' + t + ' ')) ? true : null;
+      }
+    }
+    const names = { title: 'Title', func: 'Department', company: 'Company', location: 'Location' };
+    const used = Object.keys(checks).filter(k => checks[k] !== null || (k === 'location' && targets.length));
+    const label = used.map(k => names[k] + ' ' + (checks[k] === true ? '✓' : checks[k] === false ? '✗' : '?')).join(' · ');
+    const pass = Object.keys(checks).every(k => checks[k] !== false);
+    const strictPass = used.every(k => checks[k] === true);
+    return { profile: p, checks, label, pass, strictPass, matchedCompany };
+  }
+
+  function normalizeCompanyUrl(u) {
+    let url;
+    try { url = new URL(normSpace(u)); } catch (e) { return null; }
+    if (!/^https?:$/.test(url.protocol)) return null;
+    const host = url.hostname.toLowerCase();
+    if (!(host === 'linkedin.com' || host.endsWith('.linkedin.com'))) return null;
+    const m = url.pathname.match(/^\/company\/([^/]+)/i);
+    if (!m) return null;
+    let slug = m[1];
+    try { slug = decodeURIComponent(slug); } catch (e) { /* keep raw slug */ }
+    slug = normSpace(slug).toLowerCase();
+    return slug ? 'https://www.linkedin.com/company/' + encodeURIComponent(slug) : null;
+  }
+
+  const SIZE_BUCKETS = [['1-10', 1, 10], ['11-50', 11, 50], ['51-200', 51, 200], ['201-500', 201, 500],
+    ['501-1000', 501, 1000], ['1001-5000', 1001, 5000], ['5001-10000', 5001, 10000], ['10001+', 10001, Infinity]];
+
+  // "11-50 employees" -> "11-50"; "2-10" -> "1-10"; "1,234 employees" -> "1001-5000".
+  function sizeBucket(sizeText) {
+    const m = str(sizeText).replace(/,/g, '').match(/\d+/);
+    if (!m) return '';
+    const n = Number(m[0]);
+    const b = SIZE_BUCKETS.find(x => n >= x[1] && n <= x[2]);
+    return b ? b[0] : '';
+  }
+
+  function parseCompanyResult(res) {
+    if (!res) return null;
+    const url = normalizeCompanyUrl(res.link || res.url || '');
+    if (!url) return null;
+    const rawTitle = normSpace(res.title);
+    let name = rawTitle.replace(/\s*(\.\.\.|…)\s*$/, '').replace(/\s*[|\-–—:]\s*LinkedIn\b.*$/i, '');
+    name = normSpace(name.split(/\s+\|\s+/)[0]).replace(/\s*[:|-]\s*(overview|about|jobs|people|life|posts)$/i, '');
+    if (!name || /^linkedin$/i.test(name)) {
+      name = decodeURIComponent(url.split('/company/')[1] || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
+    }
+    const text = [res.snippet].concat(Array.isArray(res.extras) ? res.extras : []).join(' · ');
+    const grab = re => { const m = text.match(re); return m ? normSpace(m[1]).replace(/[.;,]$/, '') : ''; };
+    const size = grab(/(\d[\d,]*\s*[-–]\s*\d[\d,]*|\d[\d,]*\+?)\s+employees/i);
+    return {
+      url, name,
+      followers: grab(/(\d[\d.,]*\s*[KkMm]?)\+?\s+followers/i),
+      size, sizeBucket: sizeBucket(size),
+      industry: grab(/Industry:?\s*([^·•|;\n]+?)(?:\s*[·•|;]|\.\s|$)/i),
+      hq: grab(/Headquarters:?\s*([^·•|;\n]+?)(?:\s*[·•|;]|\.\s|$)/i),
+      website: grab(/Website:?\s*((?:https?:\/\/)?[\w-]+(?:\.[\w-]+)+[^\s·•|;]*)/i),
+      resultTitle: rawTitle, snippet: normSpace(res.snippet),
+    };
   }
 
   function googleUrl(query) {
@@ -932,7 +1122,8 @@
     normSpace, fold, words, isLocation, cleanPersonName, searchName, splitName, nameSimilarity,
     stripLegal, companyForQuery, titleForQuery, cityOf, normalizeLinkedInUrl, parseProfileResult,
     judgeResult, evaluateResults, rankCandidates, DEFAULT_TEMPLATES, queryVars, fillTemplate,
-    buildFindQueries, buildXrayQueries, googleUrl, parseLeads, leadKey, looksLikeName,
+    buildFindQueries, buildXrayQueries, buildLeadPlan, buildCompanyPlan, checkLeadFilters, SENIORITY, COUNTRIES,
+    countryName, normalizeCompanyUrl, parseCompanyResult, sizeBucket, SIZE_BUCKETS, googleUrl, parseLeads, leadKey, looksLikeName,
     toCSV, toTSV, toXLSX, zipFiles, crc32, colName,
   };
 });
