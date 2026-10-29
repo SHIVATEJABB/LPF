@@ -329,3 +329,46 @@ test('company search: queries, result parsing, size buckets', () => {
   assert.equal(C.parseCompanyResult({ title: 'LinkedIn', link: 'https://uk.linkedin.com/company/acme-widgets' }).name, 'Acme Widgets');
   assert.deepEqual(['2-10', '10,001+', '1,234', '51-200 employees', ''].map(C.sizeBucket), ['1-10', '10001+', '1001-5000', '51-200', '']);
 });
+
+test('company / name / title columns without a header (pasted from a spreadsheet)', () => {
+  const text = fs.readFileSync(path.join(__dirname, 'fixtures', 'company_name_title_sample.tsv'), 'utf8');
+  const r = C.parseLeads(text);
+  assert.equal(r.mode, 'columns');
+  assert.equal(r.leads.length, 29);
+  assert.equal(r.duplicates, 4); // repeated rows and "Michael A. Cory" = "Michael Cory"
+  assert.deepEqual(r.companiesWithoutPeople, ['Cosm', 'EBSCO', 'Arjo']);
+  const by = Object.fromEntries(r.leads.map(l => [l.name, l]));
+  assert.deepEqual([by['Robert James'].company, by['Robert James'].title],
+    ['Certa ProPainters', 'Owner & Chief Executive Officer (CertaPro Painters of Libertyville)']);
+  // garbled characters repaired
+  assert.equal(by['Michael Weisenbeck'].company, 'Körber Pharma');
+  assert.ok(by['Renée Wardlaw'] && by['Christian Colón'] && by['Francisco Šinigoj'] && by['Luis Humberto Eraña']);
+  assert.equal(by['Gregor K.'].title, 'Co‐Chief Executive Officer & Chief Operating Officer');
+  assert.equal(by['Sven Adler'].title, 'Chief Financial Officer & Managing Director');
+  // names cleaned for search
+  assert.equal(C.searchName('Marie-Helene Nadeau ðŸ ðŸ—'), 'Marie-Helene Nadeau');
+  assert.equal(C.searchName('Tarek Sardana, CD, MD, DRCPC, FAsMA, ICD.D'), 'Tarek Sardana');
+  assert.equal(C.shortName('Cpa John P. Santacroce'), 'John Santacroce');
+  assert.ok(!r.leads.some(l => /Ã|â€/.test(l.name + l.company + l.title)));
+});
+
+test('columns with a header row, an email column and a LinkedIn column', () => {
+  const r = C.parseLeads('Company\tContact\tEmail\tTitle\nAcme Roofing\tJane Doe\tjane@acme.com\tCEO\nAcme Roofing\t\t\t\n');
+  assert.equal(r.mode, 'table');
+  assert.deepEqual([r.leads[0].name, r.leads[0].company, r.leads[0].email, r.leads[0].title], ['Jane Doe', 'Acme Roofing', 'jane@acme.com', 'CEO']);
+  const h = C.parseLeads('jane@acme.com\tJane Doe\tAcme Roofing\nbob@zen.io\tBob Stone\tZen Labs\n');
+  assert.equal(h.mode, 'columns');
+  assert.deepEqual(h.leads.map(l => [l.name, l.company, l.email]), [['Jane Doe', 'Acme Roofing', 'jane@acme.com'], ['Bob Stone', 'Zen Labs', 'bob@zen.io']]);
+});
+
+test('middle initials: backup search without the initial', () => {
+  assert.deepEqual(C.buildFindQueries({ name: 'Cpa John P. Santacroce', company: 'GC&E Systems Group' }, C.DEFAULT_TEMPLATES), [
+    'site:linkedin.com/in/ "John P Santacroce" "GC&E Systems Group"',
+    'site:linkedin.com/in/ "John Santacroce" "GC&E Systems Group"',
+    'site:linkedin.com/in/ "John P Santacroce"',
+  ]);
+  assert.equal(C.fixMojibake('KÃ¶rber and RenÃ©e and José'), 'Körber and Renée and José');
+  const j = C.judgeResult({ name: 'Robert James', company: 'Certa ProPainters', title: 'Owner & Chief Executive Officer' },
+    { title: 'Robert James - Owner - CertaPro Painters of Libertyville | LinkedIn', link: 'https://www.linkedin.com/in/rj', snippet: '' });
+  assert.equal(j.verdict, 'Matched');
+});

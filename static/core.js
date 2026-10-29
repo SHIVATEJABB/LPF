@@ -57,6 +57,35 @@
     return edits + (la - i) + (lb - j) <= 1;
   }
 
+  // UTF-8 text that was read as Windows-1252 ("KÃ¶rber", "RenÃ©e", "â€™") is turned back into
+  // the real characters. Words that are already correct are left alone.
+  const CP1252 = { 0x20ac: 0x80, 0x201a: 0x82, 0x0192: 0x83, 0x201e: 0x84, 0x2026: 0x85, 0x2020: 0x86, 0x2021: 0x87,
+    0x02c6: 0x88, 0x2030: 0x89, 0x0160: 0x8a, 0x2039: 0x8b, 0x0152: 0x8c, 0x017d: 0x8e, 0x2018: 0x91, 0x2019: 0x92,
+    0x201c: 0x93, 0x201d: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97, 0x02dc: 0x98, 0x2122: 0x99, 0x0161: 0x9a,
+    0x203a: 0x9b, 0x0153: 0x9c, 0x017e: 0x9e, 0x0178: 0x9f };
+  const MOJIBAKE_HINT = /[\u00c2-\u00f4][\u0080-\u00bf\u0152-\u2122]/;
+
+  function repairWord(word) {
+    if (!MOJIBAKE_HINT.test(word) || typeof TextDecoder === 'undefined') return word;
+    const bytes = [];
+    for (const ch of word) {
+      const code = ch.codePointAt(0);
+      if (code < 0x100) bytes.push(code);
+      else if (CP1252[code] != null) bytes.push(CP1252[code]);
+      else return word;
+    }
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
+    } catch (e) {
+      return word;
+    }
+  }
+
+  function fixMojibake(text) {
+    if (!MOJIBAKE_HINT.test(str(text))) return str(text);
+    return str(text).replace(/[^ \t\r\n]+/g, repairWord).replace(/\u00e2\u20ac(?=[\p{L}\s])/gu, '-');
+  }
+
   // ---------------------------------------------------------------- reference lists
 
   function placeSet(list) { return new Set(list.split('|').map(fold)); }
@@ -94,7 +123,7 @@
 
   // ---------------------------------------------------------------- names
 
-  const HONORIFIC = /^(dr|prof|professor|mr|mrs|ms|miss|mx|er|engr|adv|ca|cs|capt|col|lt|maj|sir|dame|hon|rev)\.?$/i;
+  const HONORIFIC = /^(dr|prof|professor|mr|mrs|ms|miss|mx|er|engr|adv|ca|cs|cpa|capt|col|lt|maj|sir|dame|hon|rev)\.?$/i;
   const CREDENTIAL = /^(phd|ph\.d|mba|cpa|cfa|pmp|md|mbbs|msc|bsc|btech|mtech|llb|llm|cissp|cisa|cism|csm|cspo|frm|acca|aca|fca|cma|dba|edd|jd|rn|pe|sphr|phr|ceng|itil)\.?$/i;
 
   function isInitial(token) { return /^\p{L}\.?$/u.test(token); }
@@ -105,7 +134,7 @@
     s = s.replace(/[^\p{L}\p{M}\p{N}\s.'’,-]/gu, ' ');
     const comma = s.indexOf(',');
     if (comma > 0) s = s.slice(0, comma);
-    const parts = normSpace(s).split(' ').filter(p => p && !/^[.'’-]+$/.test(p));
+    const parts = normSpace(s).split(' ').filter(p => p && !/^[.'’-]+$/.test(p) && !MOJIBAKE_HINT.test(p));
     while (parts.length > 1 && HONORIFIC.test(parts[0])) parts.shift();
     while (parts.length > 1 && /^[A-Z.]+$/.test(parts[parts.length - 1]) && CREDENTIAL.test(parts[parts.length - 1])) parts.pop();
     return parts.join(' ');
@@ -432,11 +461,25 @@
     return missing ? null : normSpace(out);
   }
 
+  // Name without middle initials ("John P. Santacroce" -> "John Santacroce").
+  function shortName(raw) {
+    const parts = searchName(raw).split(' ').filter(Boolean);
+    const full = parts.filter(p => !isInitial(p));
+    return full.length >= 2 ? full.join(' ') : parts.join(' ');
+  }
+
   function buildFindQueries(lead, templates) {
     const list = (Array.isArray(templates) ? templates : str(templates).split('\n')).map(normSpace).filter(Boolean);
     const vars = queryVars(lead);
     if (!vars.name) return [];
-    return uniq(list.map(t => fillTemplate(t, vars)).filter(Boolean));
+    const out = list.map(t => fillTemplate(t, vars)).filter(Boolean);
+    // Lists often carry a middle initial that the LinkedIn profile leaves out: try both, right after the first search.
+    const short = shortName(lead.name);
+    if (out.length && short && short !== vars.name) {
+      const alt = fillTemplate(list.find(t => fillTemplate(t, vars)) || '', Object.assign({}, vars, { name: short }));
+      if (alt) out.splice(1, 0, alt);
+    }
+    return uniq(out);
   }
 
   function lines(text) {
@@ -842,7 +885,8 @@
   const HEADER_MAP = [
     ['firstName', /^first ?name$/],
     ['lastName', /^(last ?name|surname)$/],
-    ['name', /^(full ?name|name|lead ?name|contact ?name|person)$/],
+    ['email', /^(e-?mail|e-?mail address|work e-?mail)$/],
+    ['name', /^(full ?name|name|lead ?name|contact ?name|contact|person)$/],
     ['url', /(linkedin|profile ?url|^url$|^profile$)/],
     ['title', /(job ?title|^title$|position|headline|designation|^role$)/],
     ['company', /(company|account|organi[sz]ation|employer)/],
@@ -865,8 +909,69 @@
     return rows.slice(1).map(r => {
       const get = k => (col[k] == null ? '' : normSpace(r[col[k]]));
       const name = get('name') || normSpace(get('firstName') + ' ' + get('lastName'));
-      return { name, title: get('title'), company: get('company'), location: get('location'), degree: '', url: normalizeLinkedInUrl(get('url')) || '' };
+      return { name, title: get('title'), company: get('company'), location: get('location'), degree: '',
+        url: normalizeLinkedInUrl(get('url')) || '', email: EMAIL_RE.test(get('email')) ? get('email') : '' };
     }).filter(l => l.name && !isNoise(l.name) && !/\d|@|https?:/.test(l.name));
+  }
+
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
+  const HEADER_WORD = /^(company|company name|account|account name|organi[sz]ation|employer|name|full name|first name|last name|surname|contact|contact name|person|lead name|title|job title|designation|position|role|headline|e-?mail|e-?mail address|work e-?mail|location|city|state|country|region|geography|linkedin|linkedin url|profile url|url|phone|mobile|notes?)$/;
+
+  function looksLikePerson(cell) {
+    const clean = cleanPersonName(cell);
+    const n = clean.split(' ').filter(Boolean).length;
+    if (n < 2 || n > 5 || /\d|@|https?:/.test(clean) || isNoise(normSpace(cell))) return false;
+    const f = fold(clean);
+    return !ORG_HINT.test(f) && !TITLE_HINT.test(f) && !isLocation(clean);
+  }
+
+  // Columns without a header row (e.g. Company <tab> Name <tab> Title copied from a spreadsheet).
+  // Which column is which is worked out from what the cells look like.
+  function parseColumns(text) {
+    const rows = str(text).replace(/\r\n?/g, '\n').split('\n').map(l => l.split('\t').map(normSpace))
+      .filter(r => r.some(Boolean));
+    const width = Math.max(0, ...rows.map(r => r.length));
+    if (width < 2) return null;
+    const stats = [];
+    for (let c = 0; c < width; c++) {
+      const cells = rows.map(r => r[c] || '').filter(Boolean);
+      const n = cells.length || 1;
+      const share = fn => cells.filter(fn).length / n;
+      stats.push({
+        c, filled: cells.length,
+        email: share(x => EMAIL_RE.test(x)), url: share(x => !!normalizeLinkedInUrl(x)),
+        title: share(x => TITLE_HINT.test(fold(x))), loc: share(isLocation), person: share(looksLikePerson),
+      });
+    }
+    const free = new Set(stats.filter(x => x.filled).map(x => x.c));
+    const take = (key, min) => {
+      let best = null;
+      free.forEach(c => { if (stats[c][key] >= min && (!best || stats[c][key] > stats[best.c][key])) best = stats[c]; });
+      if (best) free.delete(best.c);
+      return best ? best.c : null;
+    };
+    const col = {};
+    col.email = take('email', 0.5);
+    col.url = take('url', 0.5);
+    col.name = take('person', 0.3);
+    if (col.name == null) return null;
+    col.title = take('title', 0.4);
+    col.location = take('loc', 0.5);
+    let company = null;
+    free.forEach(c => { if (company == null || stats[c].filled > stats[company].filled) company = c; });
+    col.company = company;
+    const get = (r, k) => (col[k] == null ? '' : r[col[k]] || '');
+    const leads = [], noName = [];
+    rows.forEach(r => {
+      const name = get(r, 'name');
+      if (!name || !/\p{L}/u.test(name) || /@|https?:/.test(name) || isNoise(name)) {
+        if (get(r, 'company')) noName.push(get(r, 'company'));
+        return;
+      }
+      leads.push({ name, title: get(r, 'title'), company: get(r, 'company'), location: get(r, 'location'), degree: '',
+        url: normalizeLinkedInUrl(get(r, 'url')) || '', email: EMAIL_RE.test(get(r, 'email')) ? get(r, 'email') : '' });
+    });
+    return { leads, noName, skipped: rows.length - leads.length - noName.length };
   }
 
   function parsePipes(text) {
@@ -891,7 +996,10 @@
   }
 
   function leadKey(lead) {
-    return words(cleanPersonName(lead.name)).join(' ') + '|' + words(stripLegal(lead.company || '')).join(' ');
+    const t = words(cleanPersonName(lead.name));
+    const full = t.filter(x => x.length > 1);
+    const person = full.length >= 2 ? full[0] + ' ' + full[full.length - 1] : t.join(' ');
+    return person + '|' + words(stripLegal(lead.company || '')).join(' ');
   }
 
   function finishLead(l) {
@@ -899,13 +1007,14 @@
     return {
       name: normSpace(l.name), firstName: n.firstName, lastName: n.lastName,
       title: normSpace(l.title), company: normSpace(l.company), location: normSpace(l.location),
-      degree: l.degree || '', url: l.url || '',
+      degree: l.degree || '', url: l.url || '', email: l.email || '',
     };
   }
 
   function parseLeads(text) {
-    const result = { leads: [], mode: 'none', duplicates: 0, skipped: 0 };
+    const result = { leads: [], mode: 'none', duplicates: 0, skipped: 0, companiesWithoutPeople: [] };
     if (!normSpace(text)) return result;
+    text = fixMojibake(text);
     const L = rawLines(text);
     let leads = null;
     const anchors = findAnchors(L);
@@ -915,9 +1024,26 @@
     }
     if (!leads) {
       const firstLine = (str(text).split(/\r?\n/).find(l => normSpace(l)) || '').toLowerCase();
-      if (/(^|[\t,;"])\s*(full ?name|name|first ?name)\s*($|[\t,;"])/.test(firstLine)) {
+      const headerCells = firstLine.split(firstLine.includes('\t') ? '\t' : ',').map(x => fold(x.replace(/"/g, ''))).filter(Boolean);
+      if (headerCells.length > 1 && headerCells.every(x => HEADER_WORD.test(x))) {
         const t = parseTable(text);
         if (t && t.length) { result.mode = 'table'; leads = t; }
+      }
+    }
+    if (!leads) {
+      const ls = str(text).split(/\r?\n/).filter(l => normSpace(l));
+      if (ls.length && ls.filter(l => l.includes('\t')).length >= ls.length * 0.5) {
+        const t = parseColumns(text);
+        if (t && t.leads.length) {
+          result.mode = 'columns';
+          leads = t.leads;
+          result.skipped += t.skipped;
+          const seenCo = new Set();
+          t.noName.forEach(c => {
+            const k = words(stripLegal(c)).join(' ');
+            if (k && !seenCo.has(k)) { seenCo.add(k); result.companiesWithoutPeople.push(c); }
+          });
+        }
       }
     }
     if (!leads) {
@@ -1122,7 +1248,7 @@
     normSpace, fold, words, isLocation, cleanPersonName, searchName, splitName, nameSimilarity,
     stripLegal, companyForQuery, titleForQuery, cityOf, normalizeLinkedInUrl, parseProfileResult,
     judgeResult, evaluateResults, rankCandidates, DEFAULT_TEMPLATES, queryVars, fillTemplate,
-    buildFindQueries, buildXrayQueries, buildLeadPlan, buildCompanyPlan, checkLeadFilters, SENIORITY, COUNTRIES,
+    fixMojibake, shortName, buildFindQueries, buildXrayQueries, buildLeadPlan, buildCompanyPlan, checkLeadFilters, SENIORITY, COUNTRIES,
     countryName, normalizeCompanyUrl, parseCompanyResult, sizeBucket, SIZE_BUCKETS, googleUrl, parseLeads, leadKey, looksLikeName,
     toCSV, toTSV, toXLSX, zipFiles, crc32, colName,
   };

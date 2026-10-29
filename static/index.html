@@ -34,7 +34,8 @@
         <p class="hint">In Sales Navigator open a lead list or search results page, press <kbd>Ctrl</kbd>+<kbd>A</kbd> then
           <kbd>Ctrl</kbd>+<kbd>C</kbd>, and paste here. Extra text such as “Saved Badge”, “2nd”, “Add note” or dates is
           removed automatically. Paste one page at a time: each paste is <b>added</b> to your sheet and duplicates are skipped.
-          You can also paste a table from Excel or Google Sheets with a header row (Name, Title, Company, Location).</p>
+          You can also paste columns from Excel or Google Sheets – e.g. <b>Company · Name · Title</b> (with or without a header
+          row, an Email column is kept) – and the tool works out which column is which.</p>
         <textarea id="pasteBox" spellcheck="false" placeholder="Paste your copied Sales Navigator page here…"></textarea>
         <div class="row">
           <button id="parseBtn" class="btn primary">Clean &amp; add leads</button>
@@ -42,6 +43,7 @@
           <button id="demoBtn" class="btn ghost">Load demo data</button>
           <span id="parseMsg" class="msg"></span>
         </div>
+        <div class="row"><button id="noNameBtn" class="btn small" hidden></button></div>
       </div>
 
       <div class="tabpane" id="tab-xray" hidden>

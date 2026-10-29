@@ -22,6 +22,7 @@
     { key: 'company', label: 'Company', width: 32 },
     { key: 'location', label: 'Location', width: 28 },
     { key: 'url', label: 'LinkedIn URL', type: 'url', width: 48 },
+    { key: 'email', label: 'Email', width: 30 },
     { key: 'statusText', label: 'Match Status', width: 14 },
     { key: 'confidence', label: 'Confidence %', type: 'number', width: 13 },
     { key: 'match', label: 'Filter Match', width: 34 },
@@ -32,7 +33,7 @@
     { key: 'source', label: 'Source', width: 16 },
     { key: 'note', label: 'Notes', width: 40 },
   ];
-  const DEFAULT_EXPORT = ['no', 'name', 'firstName', 'lastName', 'title', 'company', 'location', 'url',
+  const DEFAULT_EXPORT = ['no', 'name', 'firstName', 'lastName', 'title', 'company', 'location', 'url', 'email',
     'statusText', 'confidence', 'match', 'degree', 'query', 'source', 'note'];
 
   const COMPANY_COLUMNS = [
@@ -100,7 +101,7 @@
   }
 
   const ROW_FIELDS = ['name', 'firstName', 'lastName', 'title', 'company', 'location', 'degree', 'source', 'url',
-    'status', 'resultTitle', 'snippet', 'query', 'note', 'error', 'match'];
+    'status', 'resultTitle', 'snippet', 'query', 'note', 'error', 'match', 'email'];
   const COMPANY_FIELDS = ['name', 'url', 'industry', 'size', 'sizeBucket', 'hq', 'followers', 'website', 'snippet', 'query'];
 
   function sanitizeCompany(c, id) {
@@ -127,7 +128,7 @@
     const n = C.splitName(lead.name);
     return Object.assign(sanitizeRow({
       name: lead.name, firstName: lead.firstName || n.firstName, lastName: lead.lastName || n.lastName,
-      title: lead.title, company: lead.company, location: lead.location, degree: lead.degree, source,
+      title: lead.title, company: lead.company, location: lead.location, degree: lead.degree, email: lead.email, source,
       url: lead.url || '', status: lead.url ? 'Manual' : 'Pending',
     }, state.nextId++), extra || {});
   }
@@ -421,6 +422,8 @@
     return { added, dup };
   }
 
+  let pendingCompanies = [];
+
   function parsePaste() {
     const text = $('pasteBox').value;
     if (!text.trim()) { setMsg('parseMsg', 'Paste something first.', 'bad'); return; }
@@ -429,12 +432,17 @@
       setMsg('parseMsg', 'No people found in that text. Copy the whole Sales Navigator page (Ctrl+A, Ctrl+C) and try again.', 'bad');
       return;
     }
-    const r = addLeads(res.leads, res.mode === 'table' ? 'Import' : 'Sales Navigator');
+    const r = addLeads(res.leads, res.mode === 'sales-navigator' || res.mode === 'blocks' ? 'Sales Navigator' : 'Import');
     const noCompany = res.leads.filter(l => !l.company).length;
     const parts = ['Added ' + plural(r.added, 'new lead')];
     if (r.dup + res.duplicates) parts.push(plural(r.dup + res.duplicates, 'duplicate') + ' skipped');
     if (noCompany) parts.push(noCompany + ' without a company');
-    setMsg('parseMsg', parts.join(' · ') + '. Paste the next page or start the search.', 'ok');
+    if (res.skipped) parts.push(res.skipped + ' empty or title-only ' + (res.skipped === 1 ? 'row' : 'rows') + ' skipped');
+    setMsg('parseMsg', parts.join(' · ') + '. Paste more or start the search.', 'ok');
+    pendingCompanies = res.companiesWithoutPeople || [];
+    $('noNameBtn').hidden = !pendingCompanies.length;
+    $('noNameBtn').textContent = pendingCompanies.length + (pendingCompanies.length === 1 ? ' company has' : ' companies have')
+      + ' no contact name – find decision makers there →';
     $('pasteBox').value = '';
     view.filter = 'all';
     view.page = Math.max(1, Math.ceil(state.rows.length / view.pageSize));
@@ -913,6 +921,10 @@
   function useSelectedCompanies() {
     const names = state.companies.filter(c => c.selected).map(c => c.name);
     if (!names.length) { toast('Tick at least one company first.'); return; }
+    sendCompaniesToLeadSearch(names);
+  }
+
+  function sendCompaniesToLeadSearch(names) {
     const x = state.settings.xray;
     const merged = [];
     const seen = new Set();
@@ -1283,6 +1295,16 @@
     $('cSelectAll').addEventListener('click', () => { state.companies.forEach(c => { c.selected = true; }); renderCompanies(); scheduleSave(); });
     $('cSelectNone').addEventListener('click', () => { state.companies.forEach(c => { c.selected = false; }); renderCompanies(); scheduleSave(); });
     $('cUseBtn').addEventListener('click', useSelectedCompanies);
+    $('noNameBtn').addEventListener('click', () => {
+      if (!pendingCompanies.length) return;
+      sendCompaniesToLeadSearch(pendingCompanies);
+      if (!state.settings.xray.seniority.length && !C.normSpace(state.settings.xray.titles)) {
+        state.settings.xray.seniority = ['owner', 'cxo'];
+        $('xSeniority').querySelectorAll('input[data-k]').forEach(cb => { cb.checked = state.settings.xray.seniority.includes(cb.getAttribute('data-k')); });
+      }
+      $('noNameBtn').hidden = true;
+      pendingCompanies = [];
+    });
     $('cXlsxBtn').addEventListener('click', () => exportCompanies('xlsx'));
     $('cCsvBtn').addEventListener('click', () => exportCompanies('csv'));
     $('cClearBtn').addEventListener('click', () => {

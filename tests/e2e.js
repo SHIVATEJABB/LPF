@@ -94,6 +94,23 @@ function readXlsx(file) {
     assert.equal(await page.evaluate(() => window.__llf.state.rows.length), 25);
     step('pasting the same page again adds no duplicates');
 
+    // 1b. A Company / Name / Title list pasted from a spreadsheet.
+    await page.evaluate(t => { document.getElementById('pasteBox').value = t; },
+      fs.readFileSync(path.join(__dirname, 'fixtures', 'company_name_title_sample.tsv'), 'utf8'));
+    await page.click('#parseBtn');
+    assert.match(await page.textContent('#parseMsg'), /Added 29 new leads · 4 duplicates skipped/);
+    assert.equal(await page.isVisible('#noNameBtn'), true);
+    await page.click('#noNameBtn');
+    assert.equal(await page.inputValue('#xCompanies'), 'Cosm\nEBSCO\nArjo');
+    assert.equal(await page.isChecked('#xSeniority input[data-k="cxo"]'), true);
+    await page.fill('#xCompanies', '');
+    await page.dispatchEvent('#xCompanies', 'change');
+    await page.uncheck('#xSeniority input[data-k="owner"]');
+    await page.uncheck('#xSeniority input[data-k="cxo"]');
+    await page.click('.tab[data-tab="paste"]');
+    await page.evaluate(() => { const s = window.__llf.state; s.rows.splice(25); });
+    step('Company/Name/Title list: 29 people, 4 repeats merged, 3 company-only rows sent to Lead search');
+
     // 2. Custom limits.
     await page.fill('#maxLeads', '3000');
     await page.dispatchEvent('#maxLeads', 'change');
