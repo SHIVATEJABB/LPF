@@ -23,6 +23,13 @@
     { key: 'location', label: 'Location', width: 28 },
     { key: 'url', label: 'LinkedIn URL', type: 'url', width: 48 },
     { key: 'email', label: 'Email', width: 30 },
+    { key: 'website', label: 'Company Website', type: 'url', width: 32 },
+    { key: 'companyUrl', label: 'Company LinkedIn URL', type: 'url', width: 45 },
+    { key: 'companyIndustry', label: 'Company Industry', width: 24 },
+    { key: 'companySize', label: 'Company Size', width: 18 },
+    { key: 'companyHq', label: 'Company HQ', width: 24 },
+    { key: 'liTitle', label: 'Title on LinkedIn', width: 36 },
+    { key: 'liCompany', label: 'Company on LinkedIn', width: 30 },
     { key: 'statusText', label: 'Match Status', width: 14 },
     { key: 'confidence', label: 'Confidence %', type: 'number', width: 13 },
     { key: 'match', label: 'Filter Match', width: 34 },
@@ -34,6 +41,7 @@
     { key: 'note', label: 'Notes', width: 40 },
   ];
   const DEFAULT_EXPORT = ['no', 'name', 'firstName', 'lastName', 'title', 'company', 'location', 'url', 'email',
+    'website', 'companyUrl', 'companyIndustry', 'companySize', 'companyHq', 'liTitle', 'liCompany',
     'statusText', 'confidence', 'match', 'degree', 'query', 'source', 'note'];
 
   const COMPANY_COLUMNS = [
@@ -49,7 +57,7 @@
   ];
 
   const DEFAULTS = {
-    maxLeads: 0, startRow: 1, resultsPerQuery: 10, maxQueriesPerLead: 2, onlyNew: true,
+    maxLeads: 0, startRow: 1, resultsPerQuery: 10, maxQueriesPerLead: 2, onlyNew: true, findWebsite: true, findCompanyPage: true,
     gl: '', hl: 'en', concurrency: 2, delayMs: 300, matchMin: 75, reviewMin: 50, cacheDays: 30,
     templates: C.DEFAULT_TEMPLATES.join('\n'),
     exportScope: 'all', exportColumns: DEFAULT_EXPORT.slice(),
@@ -61,7 +69,7 @@
 
   // ---------------------------------------------------------------- state
 
-  const state = { rows: [], companies: [], nextId: 1, settings: clone(DEFAULTS) };
+  const state = { rows: [], companies: [], companyInfo: {}, nextId: 1, settings: clone(DEFAULTS) };
   const view = { filter: 'all', search: '', page: 1, pageSize: 100, open: new Set(), cpage: 1 };
   const run = newRun();
   let server = { ok: false, provider: '', keys: {} };
@@ -101,7 +109,8 @@
   }
 
   const ROW_FIELDS = ['name', 'firstName', 'lastName', 'title', 'company', 'location', 'degree', 'source', 'url',
-    'status', 'resultTitle', 'snippet', 'query', 'note', 'error', 'match', 'email'];
+    'status', 'resultTitle', 'snippet', 'query', 'note', 'error', 'match', 'email',
+    'liTitle', 'liCompany', 'liLocation', 'companyUrl', 'website', 'companyIndustry', 'companySize', 'companyHq'];
   const COMPANY_FIELDS = ['name', 'url', 'industry', 'size', 'sizeBucket', 'hq', 'followers', 'website', 'snippet', 'query'];
 
   function sanitizeCompany(c, id) {
@@ -119,6 +128,7 @@
       url: String(c.url || ''), name: String(c.name || ''), resultTitle: String(c.resultTitle || ''),
       snippet: String(c.snippet || ''), confidence: int(c.confidence, 0, 0, 100), verdict: String(c.verdict || ''),
       why: String(c.why || ''), query: String(c.query || ''),
+      title: String(c.title || ''), company: String(c.company || ''), location: String(c.location || ''),
     })) : [];
     if (!row.source) row.source = 'Sales Navigator';
     return row;
@@ -216,6 +226,7 @@
       try { localStorage.setItem('llf-settings', JSON.stringify(state.settings)); } catch (e) { /* storage unavailable */ }
       const payload = {
         version: 2, savedAt: Date.now(), nextId: state.nextId, settings: state.settings, companies: state.companies,
+        companyInfo: state.companyInfo,
         rows: state.rows.map(r => Object.assign({}, r, { status: r.status === 'Searching' ? 'Pending' : r.status })),
       };
       if (server.ok) {
@@ -248,6 +259,18 @@
       state.rows = [];
       state.nextId = 1;
       saved.rows.forEach(r => { if (r && r.name) state.rows.push(sanitizeRow(r, state.nextId++)); });
+    }
+    if (saved && saved.companyInfo && typeof saved.companyInfo === 'object' && !Array.isArray(saved.companyInfo)) {
+      state.companyInfo = {};
+      Object.keys(saved.companyInfo).forEach(k => {
+        const v = saved.companyInfo[k];
+        if (!v || typeof v !== 'object') return;
+        const info = {};
+        ['name', 'website', 'websiteHow', 'pageUrl', 'pageName', 'industry', 'size', 'hq', 'followers'].forEach(f => { info[f] = v[f] == null ? '' : String(v[f]); });
+        info.webDone = !!v.webDone;
+        info.pageDone = !!v.pageDone;
+        state.companyInfo[k] = info;
+      });
     }
     if (saved && Array.isArray(saved.companies)) {
       state.companies = saved.companies.filter(c => c && c.name && c.url).map(c => sanitizeCompany(c, state.nextId++));
@@ -316,6 +339,8 @@
     const s = state.settings;
     NUMBER_FIELDS.forEach(([id, key]) => { $(id).value = s[key]; });
     $('onlyNew').checked = !!s.onlyNew;
+    $('findWebsite').checked = !!s.findWebsite;
+    $('findCompanyPage').checked = !!s.findCompanyPage;
     $('gl').value = s.gl;
     $('hl').value = s.hl;
     $('templates').value = s.templates;
@@ -342,6 +367,11 @@
       });
     });
     $('onlyNew').addEventListener('change', () => { state.settings.onlyNew = $('onlyNew').checked; updateEstimate(); scheduleSave(); });
+    ['findWebsite', 'findCompanyPage'].forEach(id => $(id).addEventListener('change', () => {
+      state.settings[id] = $(id).checked;
+      updateEstimate();
+      scheduleSave();
+    }));
     $('gl').addEventListener('change', () => { state.settings.gl = $('gl').value.trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 2); $('gl').value = state.settings.gl; scheduleSave(); });
     $('hl').addEventListener('change', () => { state.settings.hl = $('hl').value.trim().replace(/[^a-zA-Z-]/g, '').slice(0, 8); $('hl').value = state.settings.hl; scheduleSave(); });
     $('templates').addEventListener('change', () => {
@@ -408,6 +438,12 @@
   // ---------------------------------------------------------------- adding leads
 
   function addLeads(leads, source) {
+    const added = addLeadsRaw(leads, source);
+    state.rows.forEach(r => { if (!r.website && !r.companyUrl) applyCompanyInfo(r); });
+    return added;
+  }
+
+  function addLeadsRaw(leads, source) {
     const keys = new Set(state.rows.map(r => C.leadKey(r)));
     const urls = new Set(state.rows.map(r => r.url).filter(Boolean));
     let added = 0, dup = 0;
@@ -501,8 +537,11 @@
     const maxQ = Math.min(state.settings.maxQueriesPerLead, state.settings.templates.split('\n').filter(Boolean).length);
     if (!state.rows.length) { setMsg('estimate', ''); return; }
     if (!n) { setMsg('estimate', 'Nothing to search with these settings (all rows in range are done). Untick “Only search rows…” to search again.'); return; }
+    const cos = companiesToLookUp(findTargets());
+    const coCredits = cos.length * companySearchesEach();
     setMsg('estimate', plural(n, 'lead') + ' will be searched · about ' + n * pages + '–' + n * pages * maxQ
-      + ' Google searches (credits). Cached repeats are free.');
+      + ' Google searches (credits)' + (coCredits ? ' + up to ' + coCredits + ' for ' + plural(cos.length, 'company').replace('companys', 'companies') + ' (website, LinkedIn page)' : '')
+      + '. Cached repeats are free.');
   }
 
   async function waitIfPaused() {
@@ -551,7 +590,14 @@
     row.candidates = ranked.slice(0, 5).map(c => ({
       url: c.url, name: c.name, resultTitle: trunc(c.resultTitle, 200), snippet: trunc(c.snippet, 300),
       confidence: c.confidence, verdict: c.verdict, why: c.why, query: c.query || '',
+      title: c.title || c.headline || '', company: c.company || '', location: c.location || '',
     }));
+  }
+
+  function fillBlanksFromLinkedIn(row) {
+    if (!row.title && row.liTitle) row.title = row.liTitle;
+    if (!row.company && row.liCompany) { row.company = row.liCompany; applyCompanyInfo(row); }
+    if (!row.location && row.liLocation) row.location = row.liLocation;
   }
 
   function applyBest(row, ranked, lastQuery) {
@@ -565,6 +611,11 @@
       row.snippet = trunc(best.snippet, 500);
       row.query = best.query || lastQuery;
       row.note = (best.verdict === 'Review' ? 'Please check: ' : '') + best.why;
+      row.liTitle = best.title || best.headline || '';
+      row.liCompany = best.company || '';
+      row.liLocation = best.location || '';
+      // Only a sure match may fill in missing details; a Review row does it when you confirm it.
+      if (best.verdict === 'Matched') fillBlanksFromLinkedIn(row);
     } else {
       row.url = '';
       row.status = 'Not found';
@@ -692,10 +743,12 @@
     const targets = rows || findTargets();
     if (!targets.length) { toast(state.rows.length ? 'Nothing to search with these settings.' : 'Add some leads first.'); return; }
     const s = state.settings;
-    const maxCredits = targets.length * Math.ceil(s.resultsPerQuery / 10) * s.maxQueriesPerLead;
+    const coCount = rows ? 0 : companiesToLookUp(targets).length;
+    const maxCredits = targets.length * Math.ceil(s.resultsPerQuery / 10) * s.maxQueriesPerLead + coCount * companySearchesEach();
     if (server.provider !== 'mock' && maxCredits > 50 && !rows
-      && !window.confirm('Search ' + plural(targets.length, 'lead') + '? This can use up to ' + maxCredits
-        + ' search credits (usually far fewer). Searches already cached are free.')) return;
+      && !window.confirm('Search ' + plural(targets.length, 'lead')
+        + (coCount ? ' and look up ' + plural(coCount, 'company').replace('companys', 'companies') : '')
+        + '? This can use up to ' + maxCredits + ' search credits (usually far fewer). Searches already cached are free.')) return;
     startRun('find', targets.length);
     await runPool(targets, async row => {
       await processRow(row);
@@ -704,9 +757,120 @@
       scheduleRender();
       scheduleSave();
     }, s.concurrency);
+    let coSummary = '';
+    if (!rows && !run.stop && companySearchesEach()) coSummary = await lookUpCompanies(companiesToLookUp(targets));
     const c = countStatuses(targets);
     await finishRun(c.matched + ' matched, ' + c.review + ' to review, ' + c.notfound + ' not found'
-      + (c.error ? ', ' + c.error + ' errors' : '') + '.');
+      + (c.error ? ', ' + c.error + ' errors' : '') + '.' + (coSummary ? ' ' + coSummary : ''));
+  }
+
+  // ---------------------------------------------------------------- company details (website, LinkedIn page)
+
+  function companySearchesEach() {
+    return (state.settings.findWebsite ? 1 : 0) + (state.settings.findCompanyPage ? 1 : 0);
+  }
+
+  function rowCompany(r) { return r.company || r.liCompany || ''; }
+
+  // Unique companies of these rows that still need a website or LinkedIn page lookup.
+  function companiesToLookUp(rows) {
+    const s = state.settings;
+    const out = new Map();
+    rows.forEach(r => {
+      const name = rowCompany(r);
+      const key = C.companyKey(name);
+      if (!key || out.has(key)) return;
+      const info = state.companyInfo[key];
+      const needWeb = s.findWebsite && !(info && info.webDone);
+      const needPage = s.findCompanyPage && !(info && info.pageDone);
+      if (needWeb || needPage) out.set(key, name);
+    });
+    return Array.from(out, ([key, name]) => ({ key, name }));
+  }
+
+  function applyCompanyInfo(r) {
+    const info = state.companyInfo[C.companyKey(rowCompany(r))];
+    if (!info) return;
+    r.website = info.website || '';
+    r.companyUrl = info.pageUrl || '';
+    r.companyIndustry = info.industry || '';
+    r.companySize = info.size ? info.size + ' employees' : '';
+    r.companyHq = info.hq || '';
+  }
+
+  async function lookUpCompany(co) {
+    const s = state.settings;
+    const info = state.companyInfo[co.key] || { name: co.name, website: '', websiteHow: '', pageUrl: '', pageName: '',
+      industry: '', size: '', hq: '', followers: '', webDone: false, pageDone: false };
+    state.companyInfo[co.key] = info;
+    const takePage = page => {
+      info.pageUrl = page.url;
+      info.pageName = page.name;
+      info.industry = page.industry || info.industry;
+      info.size = page.size || info.size;
+      info.hq = page.hq || info.hq;
+      info.followers = page.followers || info.followers;
+      if (!info.website && page.website) info.website = page.website.startsWith('http') ? page.website : 'https://' + page.website;
+    };
+    const query = C.companyForQuery(co.name) || co.name;
+    if (s.findWebsite && !info.webDone) {
+      const resp = await doSearch(query, 1, 'web', { meta: { company: co.name } });
+      if (!resp.ok) return false;
+      const site = C.pickWebsite(co.name, resp.results, resp.kg);
+      if (site) { info.website = site.url; info.websiteHow = site.how; }
+      const page = !info.pageUrl && C.pickCompanyPage(co.name, resp.results);
+      if (page) { takePage(page); info.pageDone = true; }
+      info.webDone = true;
+    }
+    if (s.findCompanyPage && !info.pageDone) {
+      if (run.stop) return false;
+      const resp = await doSearch('site:linkedin.com/company/ ' + query, 1, 'company', { meta: { company: co.name } });
+      if (!resp.ok) return false;
+      const page = C.pickCompanyPage(co.name, resp.results);
+      if (page) takePage(page);
+      info.pageDone = true;
+    }
+    return true;
+  }
+
+  // Runs inside a search run (after the people) or on its own from the button.
+  async function lookUpCompanies(list) {
+    if (!list.length) return '';
+    run.kind = 'companyinfo';
+    run.total = list.length;
+    run.done = 0;
+    renderProgress();
+    await runPool(list, async co => {
+      await waitIfPaused();
+      if (run.stop) return;
+      await lookUpCompany(co);
+      run.done++;
+      renderProgress();
+      scheduleSave();
+    }, state.settings.concurrency);
+    state.rows.forEach(applyCompanyInfo);
+    const done = list.map(co => state.companyInfo[co.key]).filter(Boolean);
+    const sites = done.filter(i => i.website).length, pages = done.filter(i => i.pageUrl).length;
+    return 'Companies: ' + sites + ' of ' + list.length + ' websites and ' + pages + ' LinkedIn pages found.';
+  }
+
+  async function runCompanyDetails() {
+    if (!companySearchesEach()) { toast('Tick “Company website” or “Company LinkedIn page” first.'); return; }
+    if (!preflight()) return;
+    const list = companiesToLookUp(state.rows);
+    if (!list.length) {
+      state.rows.forEach(applyCompanyInfo);
+      renderAll();
+      toast(state.rows.length ? 'All companies in the sheet are already looked up.' : 'Add some leads first.');
+      return;
+    }
+    const max = list.length * companySearchesEach();
+    if (server.provider !== 'mock' && max > 50
+      && !window.confirm('Look up ' + plural(list.length, 'company').replace('companys', 'companies') + '? This can use up to '
+        + max + ' search credits. Searches already cached are free.')) return;
+    startRun('companyinfo', list.length);
+    const summary = await lookUpCompanies(list);
+    await finishRun(summary);
   }
 
   function xrayOptions() { return Object.assign({}, state.settings.xray); }
@@ -971,6 +1135,7 @@
 
   function renderRunButtons() {
     $('runBtn').disabled = run.active;
+    $('companyInfoBtn').disabled = run.active;
     $('xRun').disabled = run.active;
     $('cRun').disabled = run.active;
     $('cUseBtn').disabled = run.active || !state.companies.some(c => c.selected);
@@ -990,7 +1155,8 @@
       const left = Math.round(((run.total - run.done) * secs) / run.done);
       eta = ' · about ' + (left > 90 ? Math.round(left / 60) + ' min' : left + ' s') + ' left';
     }
-    const what = run.kind === 'xray' ? 'matching leads found' : run.kind === 'company' ? 'companies found' : 'leads searched';
+    const what = run.kind === 'xray' ? 'matching leads found' : run.kind === 'company' ? 'companies found'
+      : run.kind === 'companyinfo' ? 'companies looked up (website, LinkedIn page)' : 'leads searched';
     setMsg('progressText', (run.paused ? 'Paused · ' : '') + run.done + ' / ' + run.total + ' ' + what + ' · '
       + run.credits + ' credits used' + (run.cached ? ' · ' + run.cached + ' cached' : '')
       + (run.errors ? ' · ' + plural(run.errors, 'error') : '') + eta);
@@ -1040,7 +1206,16 @@
       r.source !== 'Sales Navigator' ? el('span', { className: 'sub', text: r.source }) : null,
     ]));
     tr.appendChild(el('td', { text: r.title }));
-    tr.appendChild(el('td', { text: r.company }));
+    const site = safeHref(r.website), page = safeHref(r.companyUrl);
+    tr.appendChild(el('td', null, [
+      el('span', { text: r.company }),
+      r.liCompany && C.companyKey(r.liCompany) !== C.companyKey(r.company) ? el('span', { className: 'sub', text: 'LinkedIn: ' + r.liCompany }) : null,
+      site || page ? el('span', { className: 'sub links' }, [
+        site ? el('a', { href: site, target: '_blank', rel: 'noopener noreferrer', text: site.replace(/^https?:\/\/(www\.)?/, '') }) : null,
+        site && page ? ' · ' : null,
+        page ? el('a', { href: page, target: '_blank', rel: 'noopener noreferrer', text: 'LinkedIn page' }) : null,
+      ]) : null,
+    ]));
     tr.appendChild(el('td', { text: r.location }));
     const href = safeHref(r.url);
     tr.appendChild(el('td', null, [el('div', { className: 'urlcell' }, [
@@ -1158,6 +1333,7 @@
     } else if (act === 'confirm') {
       row.status = 'Manual';
       row.note = 'Confirmed by you · ' + row.note.replace(/^Please check: /, '');
+      fillBlanksFromLinkedIn(row);
     } else if (act === 'use') {
       const c = row.candidates[Number(btn.getAttribute('data-i'))];
       if (!c) return;
@@ -1168,6 +1344,10 @@
       row.snippet = c.snippet;
       row.query = c.query || row.query;
       row.note = 'Chosen by you';
+      row.liTitle = c.title;
+      row.liCompany = c.company;
+      row.liLocation = c.location;
+      fillBlanksFromLinkedIn(row);
     }
     renderAll();
     scheduleSave();
@@ -1324,6 +1504,7 @@
     $('xPreview').addEventListener('click', previewXray);
     $('xRun').addEventListener('click', runXray);
     $('runBtn').addEventListener('click', () => runFind());
+    $('companyInfoBtn').addEventListener('click', runCompanyDetails);
     $('pauseBtn').addEventListener('click', () => {
       run.paused = !run.paused;
       if (!run.paused) { run.consecutiveErrors = 0; hideBanner(); }

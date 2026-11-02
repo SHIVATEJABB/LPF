@@ -708,6 +708,97 @@
     };
   }
 
+  // ---------------------------------------------------------------- company details (LinkedIn page + website)
+
+  // Sites that are about a company but are not its own website.
+  const NOT_COMPANY_SITES = ('linkedin.com facebook.com fb.com instagram.com twitter.com x.com youtube.com tiktok.com '
+    + 'pinterest.com wikipedia.org wikidata.org crunchbase.com zoominfo.com bloomberg.com yelp.com glassdoor.com '
+    + 'glassdoor.co.in indeed.com bbb.org yellowpages.com manta.com dnb.com mapquest.com apollo.io rocketreach.co '
+    + 'signalhire.com craft.co owler.com cbinsights.com pitchbook.com google.com amazon.com reddit.com quora.com '
+    + 'angi.com angieslist.com homeadvisor.com houzz.com thumbtack.com nextdoor.com bizapedia.com opencorporates.com '
+    + 'buzzfile.com chamberofcommerce.com ambitionbox.com justdial.com indiamart.com tracxn.com comparably.com '
+    + 'prnewswire.com businesswire.com globenewswire.com medium.com apple.com reuters.com nytimes.com wsj.com '
+    + 'forbes.com cnbc.com businessinsider.com yahoo.com marketwatch.com apnews.com fool.com seekingalpha.com '
+    + 'investopedia.com macrotrends.net stockanalysis.com sec.gov leadiq.com lusha.com contactout.com '
+    + 'datanyze.com cognism.com theorg.com rocketreach.com usnews.com tripadvisor.com doordash.com ubereats.com '
+    + 'grubhub.com instacart.com wellfound.com angel.co builtin.com levels.fyi payscale.com salary.com '
+    + 'ziprecruiter.com simplyhired.com careerbuilder.com monster.com naukri.com threads.net').split(' ');
+
+  function hostOf(u) {
+    try { return new URL(normSpace(u)).hostname.toLowerCase().replace(/^www\d?\./, ''); } catch (e) { return ''; }
+  }
+
+  function notCompanySite(host) { return NOT_COMPANY_SITES.some(d => host === d || host.endsWith('.' + d)); }
+
+  // "certapro.com" -> "certapro", "acme.co.uk" -> "acme"
+  function siteLabel(host) {
+    const parts = host.split('.');
+    if (parts.length >= 3 && /^(co|com|org|net|ac|gov|edu|ltd|plc)$/.test(parts[parts.length - 2]) && parts[parts.length - 1].length === 2) {
+      return parts[parts.length - 3];
+    }
+    return parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+  }
+
+  function companyKey(name) { return words(stripLegal(name || '')).join(' '); }
+
+  function titleCompanyScore(company, text) {
+    const list = expandWords(words(text));
+    return companySimilarity(company, ' ' + list.join(' ') + ' ', new Set(list)) || 0;
+  }
+
+  // Does this domain look like it belongs to the company? ("certapro" for "Certa ProPainters", "ebsco" for "EBSCO Industries")
+  // Plain industry words are only accepted as a domain when they are the whole company name.
+  const COMMON_LABELS = new Set(('roofing roof roofs painting painters paint construction builders building logistics '
+    + 'transport trucking staffing jobs careers foods food solutions services group global home homes health care energy '
+    + 'electric electrical supply systems tech consulting restoration design studio marketing media capital partners '
+    + 'realty properties property motors auto insurance legal law dental medical clinic fitness gym pizza cafe coffee '
+    + 'travel tours air aviation plumbing hvac security cleaning management america american national international').split(' '));
+
+  function domainFits(company, host) {
+    const label = siteLabel(host).replace(/-/g, '');
+    if (label.length < 2) return false;
+    const all = words(stripLegal(company)).filter(x => !STOP.has(x)).join('');
+    const core = words(stripLegal(company)).filter(x => !STOP.has(x) && !GENERIC_ORG.has(x)).join('') || all;
+    if (label === all || label === core) return true;
+    if (COMMON_LABELS.has(label)) return false;
+    if (label.length >= 4 && label.startsWith(core)) return true;
+    return label.length >= 5 && core.startsWith(label) && label.length >= core.length * 0.5;
+  }
+
+  function originOf(u) {
+    try { const x = new URL(normSpace(u)); return x.protocol + '//' + x.hostname.toLowerCase(); } catch (e) { return ''; }
+  }
+
+  // Official website from Google's knowledge panel or the results; null when nothing clearly fits.
+  function pickWebsite(company, results, kg) {
+    if (kg && kg.website) {
+      const h = hostOf(kg.website);
+      if (h && !notCompanySite(h) && (domainFits(company, h) || titleCompanyScore(company, kg.title) >= 0.6)) {
+        return { url: originOf(kg.website), how: 'Google info panel' };
+      }
+    }
+    for (const r of results || []) {
+      const h = hostOf(r.link);
+      if (!h || notCompanySite(h)) continue;
+      if (domainFits(company, h)) return { url: originOf(r.link), how: 'domain matches the name' };
+      let depth = 9;
+      try { depth = new URL(r.link).pathname.split('/').filter(Boolean).length; } catch (e) { /* keep 9 */ }
+      if (depth <= 1 && titleCompanyScore(company, r.title) >= 0.6) return { url: originOf(r.link), how: 'home page title matches' };
+    }
+    return null;
+  }
+
+  // The company's LinkedIn page among the results (the name has to match).
+  function pickCompanyPage(company, results) {
+    for (const r of results || []) {
+      const c = parseCompanyResult(r);
+      if (!c) continue;
+      const score = Math.max(titleCompanyScore(company, c.name), titleCompanyScore(c.name, company));
+      if (score >= 0.6) return c;
+    }
+    return null;
+  }
+
   function googleUrl(query) {
     return 'https://www.google.com/search?q=' + encodeURIComponent(query);
   }
@@ -1249,7 +1340,7 @@
     stripLegal, companyForQuery, titleForQuery, cityOf, normalizeLinkedInUrl, parseProfileResult,
     judgeResult, evaluateResults, rankCandidates, DEFAULT_TEMPLATES, queryVars, fillTemplate,
     fixMojibake, shortName, buildFindQueries, buildXrayQueries, buildLeadPlan, buildCompanyPlan, checkLeadFilters, SENIORITY, COUNTRIES,
-    countryName, normalizeCompanyUrl, parseCompanyResult, sizeBucket, SIZE_BUCKETS, googleUrl, parseLeads, leadKey, looksLikeName,
+    countryName, normalizeCompanyUrl, parseCompanyResult, pickWebsite, pickCompanyPage, companyKey, domainFits, hostOf, sizeBucket, SIZE_BUCKETS, googleUrl, parseLeads, leadKey, looksLikeName,
     toCSV, toTSV, toXLSX, zipFiles, crc32, colName,
   };
 });

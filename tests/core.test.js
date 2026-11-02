@@ -372,3 +372,32 @@ test('middle initials: backup search without the initial', () => {
     { title: 'Robert James - Owner - CertaPro Painters of Libertyville | LinkedIn', link: 'https://www.linkedin.com/in/rj', snippet: '' });
   assert.equal(j.verdict, 'Matched');
 });
+
+test('company details: website and LinkedIn company page picked from Google results', () => {
+  for (const [c, h] of [['Certa ProPainters', 'certapro.com'], ['EBSCO Industries', 'ebsco.com'], ['CSX', 'csx.com'],
+    ['Paul Davis', 'pauldavis.com'], ['Dr. Squatch', 'drsquatch.com'], ['Grüns', 'gruns.co'], ['Unilever', 'unilever.co.uk']]) {
+    assert.ok(C.domainFits(c, h), c + ' ' + h);
+  }
+  for (const [c, h] of [['Roofing Corp of America', 'roofing.com'], ['Roofing Corp of America', 'rcofa.com'], ['CSX', 'cvs.com']]) {
+    assert.ok(!C.domainFits(c, h), c + ' ' + h);
+  }
+  // knowledge panel first, social and news sites never
+  assert.deepEqual(C.pickWebsite('CSX', [{ title: 'CSX reports Q3', link: 'https://www.reuters.com/business/csx' }],
+    { title: 'CSX Corporation', website: 'https://www.csx.com/' }), { url: 'https://www.csx.com', how: 'Google info panel' });
+  assert.equal(C.pickWebsite('Closet Factory', [
+    { title: 'Closet Factory | Facebook', link: 'https://www.facebook.com/closetfactory' },
+    { title: 'Closet Factory - Custom Closets', link: 'https://www.closetfactory.com/locations/dallas' }], null).url, 'https://www.closetfactory.com');
+  // a home page whose title matches, even when the domain is an abbreviation
+  assert.equal(C.pickWebsite("Children's Home Society of New Jersey",
+    [{ title: "Children's Home Society of New Jersey | Home", link: 'https://www.chsofnj.org/' }], null).url, 'https://www.chsofnj.org');
+  // a deep news page with the name in it is not a website
+  assert.equal(C.pickWebsite('Msi', [{ title: 'Msi news', link: 'https://news.example.com/2024/msi-story' }], null), null);
+  const page = C.pickCompanyPage('Certa ProPainters', [
+    { title: 'Other | LinkedIn', link: 'https://www.linkedin.com/company/other' },
+    { title: 'CertaPro Painters | LinkedIn', link: 'https://www.linkedin.com/company/certapro-painters/',
+      snippet: 'CertaPro Painters | 25,000 followers on LinkedIn. Industry: Construction · Company size: 1,001-5,000 employees · Headquarters: Audubon, PA' }]);
+  assert.deepEqual([page.url, page.industry, page.size, page.hq],
+    ['https://www.linkedin.com/company/certapro-painters', 'Construction', '1,001-5,000', 'Audubon, PA']);
+  assert.equal(C.pickCompanyPage('Congruex', [{ title: 'Other Mock Holdings | LinkedIn', link: 'https://www.linkedin.com/company/x' }]), null);
+  assert.equal(C.companyKey('Bison Transport Inc.'), C.companyKey('Bison Transport'));
+});

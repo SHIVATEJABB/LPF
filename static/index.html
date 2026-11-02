@@ -175,10 +175,17 @@
           <input id="maxQueries" type="number" min="1" max="5" step="1" inputmode="numeric"></label>
       </div>
       <label class="check"><input type="checkbox" id="onlyNew"> Only search rows that were not searched yet (and rows with errors)</label>
+      <div class="also">
+        <span class="field-label">Also find for each company <small>(once per company, not per person)</small></span>
+        <label class="check"><input type="checkbox" id="findWebsite"> Company website</label>
+        <label class="check"><input type="checkbox" id="findCompanyPage"> Company LinkedIn page (adds industry, size, HQ)</label>
+      </div>
+      <p class="hint small">Each profile found also fills in the person's title, company and location as shown on LinkedIn.</p>
       <div class="row">
         <button id="runBtn" class="btn primary big">▶ Start search</button>
         <button id="pauseBtn" class="btn" disabled>Pause</button>
         <button id="stopBtn" class="btn danger" disabled>Stop</button>
+        <button id="companyInfoBtn" class="btn ghost">Find company details only</button>
         <span id="estimate" class="msg"></span>
       </div>
       <div class="progress" aria-hidden="true"><div id="progressBar"></div></div>

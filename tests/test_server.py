@@ -65,6 +65,8 @@ class FakeUpstream(BaseHTTPRequestHandler):
             return self._reply(200, {"search_metadata": {"status": "Success"},
                                      "error": "Google hasn't returned any results for this query."})
         start = int(q.get("start", "0"))
+        if "kgtest" in query:
+            return self._reply(200, {"organic_results": [], "knowledge_graph": {"title": "CSX", "website": "https://www.csx.com/"}})
         return self._reply(200, {
             "search_metadata": {"status": "Success"},
             "organic_results": [
@@ -224,6 +226,11 @@ class ServerTest(unittest.TestCase):
 
     def test_05_serpapi_errors(self):
         self.use("serpapi", "good-serpapi-key")
+        s, r = self.post("/api/search", {"query": "kgtest csx", "mode": "web"})
+        self.assertEqual(r["kg"], {"title": "CSX", "website": "https://www.csx.com/"})
+        s, r = self.post("/api/search", {"query": "kgtest csx", "mode": "web"})
+        self.assertTrue(r["cached"])
+        self.assertEqual(r["kg"]["website"], "https://www.csx.com/", "the website is kept in the cache too")
         s, r = self.post("/api/search", {"query": "nothing here"})
         self.assertTrue(r["ok"])
         self.assertEqual(r["results"], [])
@@ -272,7 +279,10 @@ class ServerTest(unittest.TestCase):
         companies = [x for x in r["results"] if "/company/" in x["link"]]
         self.assertEqual(len(companies), 10)
         self.assertTrue(all("Dallas" in x["snippet"] for x in companies))
-        s, r = self.post("/api/search", {"query": 'x', "mode": "xray", "meta": {"title": "CFO", "company": "Acme"}})
+        s, r = self.post("/api/search", {"query": "Congruex", "mode": "web", "meta": {"company": "Congruex"}})
+        self.assertTrue(r["ok"])
+        self.assertIn("facebook.com", r["results"][0]["link"])
+        s, r = self.post("/api/search", {"query": "x", "mode": "xray", "meta": {"title": "CFO", "company": "Acme"}})
         self.assertIn("CFO - Acme", r["results"][0]["title"])
         s, r = self.post("/api/search", {"query": 'site:linkedin.com/in/ "Sumit Kumar" "INOCYX"', "mode": "find"})
         self.assertTrue(r["ok"])

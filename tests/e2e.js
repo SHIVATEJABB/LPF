@@ -142,6 +142,20 @@ function readXlsx(file) {
     assert.equal(leaked, 0);
     step('mock search finished: ' + JSON.stringify(counts));
 
+    // 3b. Company details came with it: website, LinkedIn company page, and the LinkedIn title/company.
+    const det = await page.evaluate(() => {
+      const rows = window.__llf.state.rows;
+      return { sites: rows.filter(r => /^https:\/\/www\.[a-z0-9]+\.com$/.test(r.website)).length,
+        pages: rows.filter(r => r.companyUrl.startsWith('https://www.linkedin.com/company/')).length,
+        liCo: rows.filter(r => r.liCompany).length, matched: rows.filter(r => r.status === 'Matched').length,
+        bad: rows.filter(r => /facebook|other-mock-holdings/.test(r.website + r.companyUrl)).length };
+    });
+    assert.ok(det.sites >= 10 && det.pages >= 10, JSON.stringify(det));
+    assert.ok(det.liCo >= det.matched, JSON.stringify(det));
+    assert.equal(det.bad, 0);
+    assert.match(await page.textContent('#progressText'), /Companies: \d+ of \d+ websites and \d+ LinkedIn pages found/);
+    step('company details found: ' + det.sites + ' websites, ' + det.pages + ' LinkedIn company pages (no Facebook / wrong pages)');
+
     // 4. Downloads.
     const [xdl] = await Promise.all([page.waitForEvent('download'), page.click('#xlsxBtn')]);
     assert.match(xdl.suggestedFilename(), /^linkedin-leads_\d{4}-\d{2}-\d{2}_\d{4}\.xlsx$/);
@@ -150,6 +164,7 @@ function readXlsx(file) {
     const sheet = readXlsx(xfile);
     assert.equal(sheet.length, 26);
     assert.deepEqual(sheet[0].slice(0, 8), ['No.', 'Full Name', 'First Name', 'Last Name', 'Job Title', 'Company', 'Location', 'LinkedIn URL']);
+    for (const h of ['Company Website', 'Company LinkedIn URL', 'Company Industry', 'Title on LinkedIn']) assert.ok(sheet[0].includes(h), h);
     assert.deepEqual(sheet[1].slice(0, 7), [1, 'Dr. Kerlin Sara Wilson', 'Kerlin', 'Sara Wilson', 'Head of Strategic Operations & Corporate Relations', 'nice Neotech Medical Systems Pvt. Ltd.', 'Chennai, Tamil Nadu, India']);
     step('Excel download works and opens: ' + sheet.length + ' rows incl. header');
 
@@ -268,6 +283,12 @@ function readXlsx(file) {
     assert.ok(people.every(r => r.match === 'Title ✓ · Company ✓ · Location ✓'), people[0].match);
     assert.match(await page.textContent('#progressText'), /left out by strict mode/);
     step('people search at those companies: 20 leads, all match every filter (strict mode)');
+
+    await page.click('#companyInfoBtn');
+    await waitFor(async () => /Finished/.test(await page.textContent('#progressText')), 60000, 'company details button');
+    const withSite = await page.evaluate(n => window.__llf.state.rows.slice(n).filter(r => r.website).length, before7b);
+    assert.ok(withSite > 0, 'lead search rows got websites');
+    step('"Find company details only" fills websites for the Lead search rows');
 
     // 8. Reload keeps everything.
     const before = await page.evaluate(() => window.__llf.state.rows.length);

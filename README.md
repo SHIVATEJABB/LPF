@@ -68,6 +68,17 @@ site:linkedin.com/in/ "{name}"
 Available fields: `{name} {first} {last} {company} {title} {city} {location}`. A template is skipped for a lead
 that is missing one of its fields (for example, no company).
 
+### What else you get for each lead
+
+- **From the person's LinkedIn result (free):** *Title on LinkedIn*, *Company on LinkedIn* and the location.
+  For sure matches, empty Job Title / Company / Location cells are filled in. A different LinkedIn company is shown
+  under the company name, which often means the person changed jobs.
+- **Company details (tick in section 2):** *Company Website* and *Company LinkedIn URL*, plus industry, size and
+  headquarters when Google shows them. This costs about 1 search per **company** for each, not per person, and each
+  company is only looked up once. Use **Find company details only** to fill them in for rows you already have.
+- Websites are taken from Google's info panel, or a result whose domain or home page matches the company name.
+  Social, directory and news sites are never used. Check websites for very short or common company names.
+
 ### What the statuses mean
 
 | Status | Meaning |

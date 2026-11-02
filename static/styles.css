@@ -191,3 +191,8 @@ legend { font-weight: 700; padding: 0 6px; }
 table.companies { min-width: 860px; }
 table.companies td:first-child, table.companies th:first-child { width: 36px; text-align: center; }
 .match { display: block; font-size: 12px; color: var(--muted); }
+
+.also { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; margin: 6px 0 2px; }
+.also label.check { margin: 0; }
+td .links a { color: var(--blue); text-decoration: none; }
+td .links a:hover { text-decoration: underline; }

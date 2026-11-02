@@ -28,7 +28,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
 DATA_DIR = os.environ.get("LLF_DATA_DIR") or os.path.join(APP_DIR, "data")
@@ -246,6 +246,18 @@ def upstream_error(provider, status, parsed, text):
     return SearchError("%s: %s" % (name, msg), fatal=fatal, retryable=retryable, status=status)
 
 
+def knowledge_panel(kg):
+    """Google's knowledge panel often names the official website of a company."""
+    if not isinstance(kg, dict):
+        return None
+    website = kg.get("website") or ""
+    if not website and isinstance(kg.get("source"), dict):
+        website = kg["source"].get("link") or ""
+    if not isinstance(website, str) or not website.startswith("http"):
+        return None
+    return {"title": str(kg.get("title") or ""), "website": website}
+
+
 def search_serpapi(key, query, page, gl, hl):
     params = {"engine": "google", "q": query, "api_key": key, "start": str((page - 1) * 10)}
     if gl:
@@ -258,7 +270,7 @@ def search_serpapi(key, query, page, gl, hl):
     err = data.get("error")
     if err:
         if NO_RESULTS.search(str(err)):
-            return [], False
+            return [], False, None
         raise upstream_error("serpapi", status, data, text)
     results = []
     for r in data.get("organic_results") or []:
@@ -271,7 +283,7 @@ def search_serpapi(key, query, page, gl, hl):
         results.append({"title": r.get("title") or "", "link": r.get("link") or "",
                         "snippet": r.get("snippet") or "", "extras": extras})
     pagination = data.get("serpapi_pagination") or data.get("pagination") or {}
-    return results, bool(pagination.get("next"))
+    return results, bool(pagination.get("next")), knowledge_panel(data.get("knowledge_graph"))
 
 
 def search_serper(key, query, page, gl, hl):
@@ -291,7 +303,7 @@ def search_serper(key, query, page, gl, hl):
         extras = [str(v) for v in attrs.values()] if isinstance(attrs, dict) else []
         results.append({"title": r.get("title") or "", "link": r.get("link") or "",
                         "snippet": r.get("snippet") or "", "extras": extras})
-    return results, len(results) >= 8
+    return results, len(results) >= 8, knowledge_panel(data.get("knowledgeGraph"))
 
 
 # ---- mock provider: fake but realistic results, no credits, for testing the whole flow
@@ -321,6 +333,32 @@ def search_mock(query, page, mode, meta=None):
         {"title": "Mock Company | LinkedIn", "link": "https://www.linkedin.com/company/mock-company",
          "snippet": "Company page (should be ignored).", "extras": []},
     ]
+    if mode == "web":
+        company = str(meta.get("company") or (phrases[0] if phrases else "Mock Company"))
+        h = _h("web|" + company)
+        site = "https://www.%s.com" % re.sub(r"[^a-z0-9]", "", company.lower())
+        out = [{"title": "%s | Facebook" % company, "link": "https://www.facebook.com/%s" % _slug(company),
+                "snippet": "Social page (should be ignored).", "extras": []}]
+        if h % 4 != 3:
+            out.append({"title": "%s - Official Site" % company, "link": site + "/", "snippet": "Welcome to %s." % company,
+                        "extras": []})
+        if h % 2 == 0:
+            out.append({"title": "%s | LinkedIn" % company, "link": "https://www.linkedin.com/company/%s" % _slug(company),
+                        "snippet": "%s | %d followers on LinkedIn. Industry: Services · Company size: 51-200 employees · "
+                                   "Headquarters: Dallas, Texas" % (company, h % 9000), "extras": []})
+        kg = {"title": company, "website": site} if h % 3 == 0 else None
+        return out, False, kg
+    if mode == "company" and meta.get("company"):
+        company = str(meta["company"])
+        h = _h("page|" + company)
+        if h % 5 == 4:
+            return [], False
+        return [{"title": "%s | LinkedIn" % company, "link": "https://www.linkedin.com/company/%s" % _slug(company),
+                 "snippet": "%s | %d followers on LinkedIn. Industry: Services · Company size: 201-500 employees · "
+                            "Headquarters: Austin, Texas · Website: https://www.%s.com" % (
+                                company, h % 9000, re.sub(r"[^a-z0-9]", "", company.lower())), "extras": []},
+                {"title": "Other Mock Holdings | LinkedIn", "link": "https://www.linkedin.com/company/other-mock-holdings",
+                 "snippet": "Another company (should not be picked).", "extras": []}], False
     if mode == "company":
         if page > 5:
             return [], False
@@ -405,11 +443,12 @@ def run_search(cfg, payload):
         raise SearchError("Bad page or cacheDays value.")
     gl = re.sub(r"[^a-z]", "", str(payload.get("gl") or "").lower())[:2]
     hl = re.sub(r"[^a-zA-Z-]", "", str(payload.get("hl") or ""))[:8]
-    mode = payload.get("mode") if payload.get("mode") in ("xray", "company") else "find"
+    mode = payload.get("mode") if payload.get("mode") in ("xray", "company", "web") else "find"
 
     if provider == "mock":
-        results, has_more = search_mock(query, page, mode, payload.get("meta"))
-        return {"ok": True, "results": results, "hasMore": has_more, "cached": False, "provider": "mock"}
+        found = search_mock(query, page, mode, payload.get("meta"))
+        return {"ok": True, "results": found[0], "hasMore": found[1], "kg": found[2] if len(found) > 2 else None,
+                "cached": False, "provider": "mock"}
 
     key = api_key(cfg, provider)
     if not key:
@@ -420,13 +459,14 @@ def run_search(cfg, payload):
     if hit is not None:
         with _lock:
             _stats["cache_hits"] += 1
-        return {"ok": True, "results": hit["results"], "hasMore": hit["hasMore"], "cached": True, "provider": provider}
+        return {"ok": True, "results": hit["results"], "hasMore": hit["hasMore"], "kg": hit.get("kg"),
+                "cached": True, "provider": provider}
 
     fn = search_serpapi if provider == "serpapi" else search_serper
     attempt = 0
     while True:
         try:
-            results, has_more = fn(key, query, page, gl, hl)
+            results, has_more, kg = fn(key, query, page, gl, hl)
             break
         except SearchError as e:
             if e.retryable and attempt < len(RETRY_DELAYS):
@@ -436,8 +476,8 @@ def run_search(cfg, payload):
             raise
     with _lock:
         _stats["api_calls"] += 1
-    CACHE.put(ckey, {"results": results, "hasMore": has_more})
-    return {"ok": True, "results": results, "hasMore": has_more, "cached": False, "provider": provider}
+    CACHE.put(ckey, {"results": results, "hasMore": has_more, "kg": kg})
+    return {"ok": True, "results": results, "hasMore": has_more, "kg": kg, "cached": False, "provider": provider}
 
 
 def test_provider(cfg):
@@ -461,7 +501,7 @@ def test_provider(cfg):
             if plan:
                 msg += " Plan: %s." % plan
             return {"ok": True, "message": msg, "searchesLeft": left}
-        results, _ = search_serper(key, 'site:linkedin.com/in/ "software engineer"', 1, "", "")
+        results = search_serper(key, 'site:linkedin.com/in/ "software engineer"', 1, "", "")[0]
         with _lock:
             _stats["api_calls"] += 1
         return {"ok": True, "message": "Serper key works (this test used 1 search, %d results)." % len(results)}
