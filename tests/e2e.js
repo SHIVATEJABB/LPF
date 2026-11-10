@@ -49,17 +49,39 @@ function readXlsx(file) {
 
   // Fake SerpApi that rejects the key, to prove a bad key stops the run immediately.
   let upstreamCalls = 0;
+  // It also plays FullEnrich: a batch is accepted, answers "IN_PROGRESS" once, then returns emails and phones.
+  const feJobs = {};
   const fake = http.createServer((req, res) => {
+    const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+    if (req.url.startsWith('/api/v2/contact/enrich/bulk')) {
+      if (req.headers.authorization !== 'Bearer good-fe') return send(401, { message: 'Invalid API key' });
+      if (req.method === 'POST') {
+        let body = '';
+        req.on('data', d => { body += d; });
+        req.on('end', () => {
+          const id = 'job' + (Object.keys(feJobs).length + 1);
+          feJobs[id] = { data: JSON.parse(body).data, polls: 0 };
+          send(200, { enrichment_id: id });
+        });
+        return;
+      }
+      const job = feJobs[req.url.split('/').pop()];
+      if (!job) return send(404, { message: 'Not found' });
+      if (job.polls++ < 1) return send(200, { status: 'IN_PROGRESS' });
+      return send(200, { status: 'FINISHED', data: job.data.map((p, i) => ({ custom: p.custom, contact_info: i % 3 === 2 ? {} : {
+        most_probable_work_email: { email: p.first_name.toLowerCase() + '@fe-' + (p.domain || 'example.com'), status: 'DELIVERABLE' },
+        most_probable_phone: { number: '+1 512 555 02' + String(i).padStart(2, '0'), region: 'US' } } })) });
+    }
     upstreamCalls++;
-    res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Invalid API key. Your API key should be here: https://serpapi.com/manage-api-key' }));
+    send(401, { error: 'Invalid API key. Your API key should be here: https://serpapi.com/manage-api-key' });
   });
   await new Promise(r => fake.listen(0, '127.0.0.1', r));
 
   const port = await freePort();
   const srv = spawn(process.platform === 'win32' ? 'python' : 'python3',
     [path.join(APP, 'server.py'), '--port', String(port), '--no-browser', '--provider', 'mock'],
-    { env: Object.assign({}, process.env, { LLF_DATA_DIR: dataDir, LLF_SERPAPI_URL: 'http://127.0.0.1:' + fake.address().port, SERPAPI_KEY: '' }) });
+    { env: Object.assign({}, process.env, { LLF_DATA_DIR: dataDir, LLF_SERPAPI_URL: 'http://127.0.0.1:' + fake.address().port,
+      LLF_FULLENRICH_URL: 'http://127.0.0.1:' + fake.address().port, SERPAPI_KEY: '', FULLENRICH_API_KEY: '' }) });
   let srvOut = '';
   srv.stdout.on('data', d => { srvOut += d; });
   srv.stderr.on('data', d => { srvOut += d; });
@@ -156,6 +178,53 @@ function readXlsx(file) {
     assert.match(await page.textContent('#progressText'), /Companies: \d+ of \d+ websites and \d+ LinkedIn pages found/);
     step('company details found: ' + det.sites + ' websites, ' + det.pages + ' LinkedIn company pages (no Facebook / wrong pages)');
 
+    // 3c. Emails & phone numbers (Mock provider, no credits).
+    await page.click('#openSettings');
+    await page.selectOption('#contactProvider', 'mock');
+    await waitFor(async () => /Mock mode on/.test(await page.textContent('#contactMsg')), 5000, 'contact provider saved');
+    assert.equal(await page.isVisible('#contactKey'), false, 'no key box in mock mode');
+    await page.keyboard.press('Escape');
+    await page.check('#findEmail');
+    await page.check('#findPhone');
+    await page.click('#contactBtn');
+    await waitFor(async () => /Finished/.test(await page.textContent('#progressText')), 60000, 'contact lookups');
+    const ct = await page.evaluate(() => {
+      const rows = window.__llf.state.rows;
+      const done = rows.filter(r => r.status === 'Matched');
+      return { matched: done.length, emails: done.filter(r => /@/.test(r.email)).length, phones: done.filter(r => r.phone).length,
+        others: rows.filter(r => r.status !== 'Matched' && (r.email || r.phone)).length, tried: done.filter(r => r.contactTried.includes('mock:email')).length };
+    });
+    assert.ok(ct.emails >= 3 && ct.phones >= 1, JSON.stringify(ct));
+    assert.equal(ct.others, 0, 'only matched leads are looked up by default');
+    assert.equal(ct.tried, ct.matched);
+    assert.match(await page.textContent('#progressText'), /Contacts: \d+ emails and \d+ phone numbers found for \d+ leads/);
+    await page.click('#contactBtn');
+    assert.match(await page.textContent('#toast'), /No matched leads need an email or phone/);
+    step('emails & phones (mock): ' + ct.emails + ' emails, ' + ct.phones + ' phones for ' + ct.matched + ' matched leads; nobody looked up twice');
+
+    // 3d. FullEnrich batch flow: send a batch, wait for it, fill in emails and phones.
+    await page.click('#openSettings');
+    await page.selectOption('#contactProvider', 'fullenrich');
+    await waitFor(() => page.isVisible('#contactKey'), 5000, 'key box');
+    await page.fill('#contactKey', 'good-fe');
+    await page.press('#contactKey', 'Enter');
+    await waitFor(async () => /Key saved/.test(await page.textContent('#contactMsg')), 5000, 'fullenrich key saved');
+    await page.keyboard.press('Escape');
+    const fePending = await page.evaluate(() => window.__llf.state.rows.filter(r => r.status === 'Matched' && (!r.email || !r.phone)).length);
+    await page.click('#contactBtn');
+    await waitFor(async () => /Finished/.test(await page.textContent('#progressText')), 60000, 'fullenrich batch');
+    const fe = await page.evaluate(() => ({
+      feEmails: window.__llf.state.rows.filter(r => /@fe-/.test(r.email)).length,
+      fePhones: window.__llf.state.rows.filter(r => /555 02/.test(r.phone)).length,
+      kept: window.__llf.state.rows.filter(r => r.contactSource === 'Mock mode' && /@/.test(r.email) && !/@fe-/.test(r.email)).length,
+      jobs: window.__llf.state.contactJobs.length }));
+    assert.equal(Object.keys(feJobs).length, 1, 'one batch for all leads');
+    assert.equal(feJobs.job1.data.length, fePending);
+    assert.ok(fe.feEmails >= 1 && fe.fePhones >= 1, JSON.stringify(fe));
+    assert.ok(fe.kept >= 3, 'emails found earlier are never replaced: ' + JSON.stringify(fe));
+    assert.equal(fe.jobs, 0, 'finished batch is cleared');
+    step('FullEnrich batch: ' + fePending + ' leads in 1 batch, ' + fe.feEmails + ' new emails, ' + fe.fePhones + ' new phones, earlier emails kept');
+
     // 4. Downloads.
     const [xdl] = await Promise.all([page.waitForEvent('download'), page.click('#xlsxBtn')]);
     assert.match(xdl.suggestedFilename(), /^linkedin-leads_\d{4}-\d{2}-\d{2}_\d{4}\.xlsx$/);
@@ -164,7 +233,7 @@ function readXlsx(file) {
     const sheet = readXlsx(xfile);
     assert.equal(sheet.length, 26);
     assert.deepEqual(sheet[0].slice(0, 8), ['No.', 'Full Name', 'First Name', 'Last Name', 'Job Title', 'Company', 'Location', 'LinkedIn URL']);
-    for (const h of ['Company Website', 'Company LinkedIn URL', 'Company Industry', 'Title on LinkedIn']) assert.ok(sheet[0].includes(h), h);
+    for (const h of ['Company Website', 'Company LinkedIn URL', 'Company Industry', 'Title on LinkedIn', 'Email', 'Email Status', 'Phone']) assert.ok(sheet[0].includes(h), h);
     assert.deepEqual(sheet[1].slice(0, 7), [1, 'Dr. Kerlin Sara Wilson', 'Kerlin', 'Sara Wilson', 'Head of Strategic Operations & Corporate Relations', 'nice Neotech Medical Systems Pvt. Ltd.', 'Chennai, Tamil Nadu, India']);
     step('Excel download works and opens: ' + sheet.length + ' rows incl. header');
 

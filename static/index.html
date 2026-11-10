@@ -180,12 +180,19 @@
         <label class="check"><input type="checkbox" id="findWebsite"> Company website</label>
         <label class="check"><input type="checkbox" id="findCompanyPage"> Company LinkedIn page (adds industry, size, HQ)</label>
       </div>
-      <p class="hint small">Each profile found also fills in the person's title, company and location as shown on LinkedIn.</p>
+      <div class="also">
+        <span class="field-label">Also find contact details <small>(for matched leads – uses your email/phone provider's credits)</small></span>
+        <label class="check"><input type="checkbox" id="findEmail"> Email</label>
+        <label class="check"><input type="checkbox" id="findPhone"> Phone number</label>
+        <label class="check"><input type="checkbox" id="contactReview"> Also for “Review” rows</label>
+      </div>
+      <p class="hint small"><span id="contactNote"></span> Each profile found also fills in the person's title, company and location as shown on LinkedIn.</p>
       <div class="row">
         <button id="runBtn" class="btn primary big">▶ Start search</button>
         <button id="pauseBtn" class="btn" disabled>Pause</button>
         <button id="stopBtn" class="btn danger" disabled>Stop</button>
         <button id="companyInfoBtn" class="btn ghost">Find company details only</button>
+        <button id="contactBtn" class="btn ghost">Find emails &amp; phones only</button>
         <span id="estimate" class="msg"></span>
       </div>
       <div class="progress" aria-hidden="true"><div id="progressBar"></div></div>
@@ -267,6 +274,29 @@
         <div class="row"><span id="testMsg" class="msg"></span></div>
         <p class="hint small">The key is stored only on this computer, in <code>data/config.json</code> next to the tool.
           One Google page (10 results) = 1 search credit. Repeated searches are answered from a local cache for free.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Email &amp; phone finder</legend>
+        <label>Provider
+          <select id="contactProvider">
+            <option value="hunter">Hunter (hunter.io) – emails</option>
+            <option value="apollo">Apollo (apollo.io) – emails</option>
+            <option value="fullenrich">FullEnrich (fullenrich.com) – emails + phone numbers</option>
+            <option value="mock">Mock test mode (made-up contacts, no credits)</option>
+          </select>
+        </label>
+        <div id="contactKeyRow">
+          <label>API key <small id="contactKeyState"></small>
+            <input id="contactKey" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your API key"></label>
+          <div class="row">
+            <button type="button" id="saveContactKeyBtn" class="btn primary">Save key</button>
+            <button type="button" id="testContactBtn" class="btn">Test connection</button>
+          </div>
+        </div>
+        <div class="row"><span id="contactMsg" class="msg"></span></div>
+        <p class="hint small">Only used when you tick <b>Email</b> or <b>Phone number</b> in section 2. Every lookup uses your
+          provider's credits (free plans are small). Emails you already have are never replaced.</p>
       </fieldset>
 
       <fieldset>

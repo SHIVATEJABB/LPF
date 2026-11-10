@@ -79,6 +79,28 @@ that is missing one of its fields (for example, no company).
 - Websites are taken from Google's info panel, or a result whose domain or home page matches the company name.
   Social, directory and news sites are never used. Check websites for very short or common company names.
 
+### Emails & phone numbers (optional, uses a provider's credits)
+
+The tool can ask an email/phone data provider for each **matched** lead (Review rows only if you tick it):
+
+| Provider | Finds | How it works |
+|---|---|---|
+| **Hunter** (hunter.io) | Emails (phone only when public) | One request per lead, using name + company website |
+| **Apollo** (apollo.io) | Emails | One request per lead, using name, company, website and LinkedIn URL |
+| **FullEnrich** (fullenrich.com) | Emails **and phone numbers** | Batches of up to 100 leads; results arrive after a few minutes |
+| **Mock test mode** | Made-up contacts | Free, for trying the tool |
+
+1. **⚙ Settings → Email & phone finder:** choose the provider, paste its API key, **Save key**, **Test connection**.
+2. In section 2 tick **Email** and/or **Phone number**. They are off by default, so nothing is spent unless you tick them.
+3. Run **▶ Start search** (looks up contacts after the profiles), or **Find emails & phones only** for leads you already searched.
+
+- Emails already in your list are never replaced. Each lead is only looked up once per provider.
+- A wrong key or empty credit balance stops the run straight away.
+- FullEnrich keeps working if you close the page: click **Find emails & phones only** later to collect the results
+  without paying again.
+- New columns: **Email**, **Email Status**, **Phone**, **Email/Phone Source**.
+- Check the rules for cold email where your leads are (e.g. CAN-SPAM in the US, GDPR in the EU/UK).
+
 ### What the statuses mean
 
 | Status | Meaning |

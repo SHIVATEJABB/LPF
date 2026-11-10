@@ -196,3 +196,4 @@ table.companies td:first-child, table.companies th:first-child { width: 36px; te
 .also label.check { margin: 0; }
 td .links a { color: var(--blue); text-decoration: none; }
 td .links a:hover { text-decoration: underline; }
+td .sub.contact { color: var(--ink); word-break: break-all; }

@@ -28,14 +28,22 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.2.0"
+VERSION = "2.4.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
 DATA_DIR = os.environ.get("LLF_DATA_DIR") or os.path.join(APP_DIR, "data")
 SERPAPI_BASE = os.environ.get("LLF_SERPAPI_URL", "https://serpapi.com").rstrip("/")
 SERPER_BASE = os.environ.get("LLF_SERPER_URL", "https://google.serper.dev").rstrip("/")
+HUNTER_BASE = os.environ.get("LLF_HUNTER_URL", "https://api.hunter.io").rstrip("/")
+APOLLO_BASE = os.environ.get("LLF_APOLLO_URL", "https://api.apollo.io").rstrip("/")
+FULLENRICH_BASE = os.environ.get("LLF_FULLENRICH_URL", "https://app.fullenrich.com").rstrip("/")
 PROVIDERS = ("serpapi", "serper", "mock")
-ENV_KEYS = {"serpapi": "SERPAPI_KEY", "serper": "SERPER_API_KEY"}
+CONTACT_PROVIDERS = ("hunter", "apollo", "fullenrich", "mock")
+KEYED = ("serpapi", "serper", "hunter", "apollo", "fullenrich")
+ENV_KEYS = {"serpapi": "SERPAPI_KEY", "serper": "SERPER_API_KEY", "hunter": "HUNTER_API_KEY",
+            "apollo": "APOLLO_API_KEY", "fullenrich": "FULLENRICH_API_KEY"}
+NAMES = {"serpapi": "SerpApi", "serper": "Serper", "hunter": "Hunter", "apollo": "Apollo", "fullenrich": "FullEnrich",
+         "mock": "Mock mode"}
 UPSTREAM_TIMEOUT = 30
 RETRY_DELAYS = (1.5, 4.0)
 MAX_STATE_BYTES = 80 * 1024 * 1024
@@ -73,13 +81,15 @@ def _config_path():
 
 
 def load_config():
-    cfg = {"provider": "serpapi", "keys": {"serpapi": "", "serper": ""}}
+    cfg = {"provider": "serpapi", "contactProvider": "hunter", "keys": dict((k, "") for k in KEYED)}
     try:
         with open(_config_path(), "r", encoding="utf-8") as f:
             saved = json.load(f)
         if saved.get("provider") in PROVIDERS:
             cfg["provider"] = saved["provider"]
-        for k in ("serpapi", "serper"):
+        if saved.get("contactProvider") in CONTACT_PROVIDERS:
+            cfg["contactProvider"] = saved["contactProvider"]
+        for k in KEYED:
             if isinstance(saved.get("keys", {}).get(k), str):
                 cfg["keys"][k] = saved["keys"][k]
     except (OSError, ValueError):
@@ -193,6 +203,9 @@ class SearchError(Exception):
 FATAL_WORDS = re.compile(r"invalid api key|api key is invalid|unauthori[sz]ed|run out of searches|out of searches|"
                          r"not enough credits|no credits|exhausted|account (is )?(disabled|suspended)|"
                          r"plan (has )?expired|missing api key|api key (is )?(missing|required)", re.I)
+CREDIT_WORDS = re.compile(r"insufficient credit|not enough credit|credits? (are |is )?(exhausted|insufficient|depleted)|"
+                          r"usage limit|usage_limit|usage_exceeded|exceeded your (monthly |plan )?(usage|limit|quota)|"
+                          r"upgrade your plan|no (more )?credits|out of credits|credits_insufficient", re.I)
 NO_RESULTS = re.compile(r"hasn't returned any results|has not returned any results|no results", re.I)
 
 
@@ -234,12 +247,15 @@ def http_json(url, data=None, headers=None, method=None):
 def upstream_error(provider, status, parsed, text):
     msg = ""
     if isinstance(parsed, dict):
-        msg = parsed.get("error") or parsed.get("message") or ""
-        if isinstance(msg, dict):
-            msg = msg.get("message") or json.dumps(msg)
+        msg = parsed.get("error") or parsed.get("message") or parsed.get("detail") or ""
+        errors = parsed.get("errors")
+        if not msg and isinstance(errors, list) and errors and isinstance(errors[0], dict):
+            msg = errors[0].get("details") or errors[0].get("message") or errors[0].get("id") or ""
+        if isinstance(msg, (dict, list)):
+            msg = json.dumps(msg)[:200]
     msg = str(msg or text[:200] or ("HTTP %d" % status)).strip()
-    name = {"serpapi": "SerpApi", "serper": "Serper"}[provider]
-    fatal = status in (401, 402, 403) or bool(FATAL_WORDS.search(msg))
+    name = NAMES.get(provider, provider)
+    fatal = status in (401, 402, 403) or bool(FATAL_WORDS.search(msg)) or bool(CREDIT_WORDS.search(msg))
     retryable = not fatal and (status == 429 or status >= 500 or status == 0)
     if fatal and status in (401, 403) and "key" not in msg.lower():
         msg += " - check the API key in Settings."
@@ -509,6 +525,262 @@ def test_provider(cfg):
         return {"ok": False, "message": e.message}
 
 
+# ------------------------------------------------------------------ email & phone finders
+
+def unexpected(provider, text):
+    return SearchError("%s sent a reply this tool does not understand - please send this to support: %s"
+                       % (NAMES[provider], (text or "(empty)")[:200]))
+
+
+def clean_person(raw):
+    if not isinstance(raw, dict):
+        raise SearchError("Bad person data.")
+    out = {}
+    for k in ("id", "first", "last", "full", "company", "domain", "linkedin"):
+        v = raw.get(k)
+        out[k] = re.sub(r"\s+", " ", str(v)).strip()[:200] if v is not None else ""
+    out["domain"] = re.sub(r"^https?://(www\.)?", "", out["domain"].lower()).split("/")[0]
+    if not out["first"] and not out["full"]:
+        raise SearchError("A name is needed to look up contact details.")
+    return out
+
+
+def hunter_find(key, p, want):
+    params = {"first_name": p["first"], "last_name": p["last"]}
+    if not p["last"]:
+        params = {"full_name": p["full"] or p["first"]}
+    if p["domain"]:
+        params["domain"] = p["domain"]
+    elif p["company"]:
+        params["company"] = p["company"]
+    else:
+        return {"email": "", "note": "No company or website to search with"}
+    status, data, text = http_json(HUNTER_BASE + "/v2/email-finder?" + urllib.parse.urlencode(params),
+                                   headers={"X-API-KEY": key})
+    if status == 404:
+        return {"email": ""}
+    if status != 200 or not isinstance(data, dict):
+        raise upstream_error("hunter", status, data, text)
+    d = data.get("data")
+    if d is None:
+        return {"email": ""}
+    if not isinstance(d, dict):
+        raise unexpected("hunter", text)
+    ver = d.get("verification") if isinstance(d.get("verification"), dict) else {}
+    email = d.get("email") or ""
+    score = d.get("score")
+    status_text = ver.get("status") or ("score %s" % score if email and score is not None else "")
+    return {"email": email, "emailStatus": status_text, "phone": (d.get("phone_number") or "") if want.get("phone") else "",
+            "title": d.get("position") or ""}
+
+
+def apollo_match(key, p, want):
+    body = {}
+    for src, dst in (("first", "first_name"), ("last", "last_name"), ("company", "organization_name"),
+                     ("domain", "domain"), ("linkedin", "linkedin_url")):
+        if p[src]:
+            body[dst] = p[src]
+    if not p["last"] and p["full"]:
+        body["name"] = p["full"]
+    status, data, text = http_json(APOLLO_BASE + "/api/v1/people/match", data=body,
+                                   headers={"x-api-key": key, "Cache-Control": "no-cache"})
+    if status != 200 or not isinstance(data, dict):
+        raise upstream_error("apollo", status, data, text)
+    if "person" not in data:
+        raise unexpected("apollo", text)
+    person = data.get("person") if isinstance(data.get("person"), dict) else {}
+    email = person.get("email") or ""
+    if "not_unlocked" in email or email.lower().endswith("@domain.com"):
+        email = ""  # Apollo's placeholder for an email that was not revealed
+    phone = ""
+    if want.get("phone"):
+        for ph in person.get("phone_numbers") or []:
+            if isinstance(ph, dict) and (ph.get("sanitized_number") or ph.get("raw_number")):
+                phone = ph.get("sanitized_number") or ph.get("raw_number")
+                break
+    return {"email": email, "emailStatus": person.get("email_status") or "", "phone": phone,
+            "title": person.get("title") or ""}
+
+
+def _pick(value, field):
+    """FullEnrich's most_probable_* can be an object ({email, status} / {number, region}) or a plain string."""
+    if isinstance(value, dict):
+        return value.get(field) or "", value.get("status") or ""
+    if isinstance(value, str):
+        return value, ""
+    return "", ""
+
+
+FULLENRICH_RUNNING = ("IN_PROGRESS", "CREATED", "QUEUED", "PENDING", "PROCESSING", "RUNNING", "STARTED")
+
+
+def fullenrich_start(key, people, want):
+    fields = []
+    if want.get("email"):
+        fields.append("contact.work_emails")
+    if want.get("phone"):
+        fields.append("contact.phones")
+    data = []
+    for p in people:
+        item = {"enrich_fields": fields, "custom": {"lpf_id": p["id"]}}
+        for src, dst in (("first", "first_name"), ("last", "last_name"), ("domain", "domain"),
+                         ("company", "company_name"), ("linkedin", "linkedin_url")):
+            if p[src]:
+                item[dst] = p[src]
+        data.append(item)
+    body = {"name": "LPF " + time.strftime("%Y-%m-%d %H:%M"), "data": data}
+    status, parsed, text = http_json(FULLENRICH_BASE + "/api/v2/contact/enrich/bulk", data=body,
+                                     headers={"Authorization": "Bearer " + key})
+    if status not in (200, 201, 202) or not isinstance(parsed, dict):
+        raise upstream_error("fullenrich", status, parsed, text)
+    job = parsed.get("enrichment_id") or parsed.get("id")
+    if not job:
+        raise unexpected("fullenrich", text)
+    return str(job)
+
+
+def fullenrich_poll(key, job):
+    if not re.match(r"^[A-Za-z0-9_-]{1,100}$", job):
+        raise SearchError("Bad job id.")
+    status, parsed, text = http_json(FULLENRICH_BASE + "/api/v2/contact/enrich/bulk/" + job,
+                                     headers={"Authorization": "Bearer " + key})
+    if status != 200 or not isinstance(parsed, dict):
+        raise upstream_error("fullenrich", status, parsed, text)
+    state = str(parsed.get("status") or "").upper()
+    if state in FULLENRICH_RUNNING:
+        return {"done": False, "status": state, "results": []}
+    if "CREDIT" in state:
+        raise SearchError("FullEnrich: not enough credits to finish (status %s)." % state, fatal=True)
+    items = parsed.get("data") if isinstance(parsed.get("data"), list) else parsed.get("datas")
+    if not isinstance(items, list):
+        if state == "FINISHED":
+            raise unexpected("fullenrich", text)
+        return {"done": True, "status": state, "results": []}
+    results = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        custom = it.get("custom") if isinstance(it.get("custom"), dict) else {}
+        info = it.get("contact_info") or it.get("contact") or {}
+        if not isinstance(info, dict):
+            info = {}
+        email, email_status = _pick(info.get("most_probable_work_email") or info.get("most_probable_email"), "email")
+        if not email_status:
+            email_status = info.get("most_probable_email_status") or ""
+        phone = _pick(info.get("most_probable_phone"), "number")[0]
+        results.append({"id": str(custom.get("lpf_id") or ""), "index": i, "email": email,
+                        "emailStatus": email_status, "phone": phone})
+    return {"done": True, "status": state, "results": results}
+
+
+
+
+def mock_contact(p, want):
+    time.sleep(0.05)
+    h = _h("contact|" + p["first"] + "|" + p["last"] + "|" + p["company"])
+    out = {"email": "", "emailStatus": "", "phone": ""}
+    domain = p["domain"] or (re.sub(r"[^a-z0-9]", "", p["company"].lower()) + ".com" if p["company"] else "")
+    if want.get("email") and domain and h % 10 < 7:
+        local = re.sub(r"[^a-z0-9.]", "", (p["first"] + "." + p["last"]).lower()).strip(".") or "contact"
+        out["email"] = "%s@%s" % (local, domain)
+        out["emailStatus"] = "valid (mock)"
+    if want.get("phone") and h % 10 < 4:
+        out["phone"] = "+1 555 01%02d" % (h % 100)
+    return out
+
+
+def contact_one(cfg, payload):
+    provider = cfg["contactProvider"]
+    want = payload.get("want") if isinstance(payload.get("want"), dict) else {}
+    want = {"email": bool(want.get("email")), "phone": bool(want.get("phone"))}
+    p = clean_person(payload.get("person"))
+    if provider == "mock":
+        return dict(mock_contact(p, want), ok=True, provider="mock")
+    if provider == "fullenrich":
+        raise SearchError("FullEnrich works in batches - reload the page and try again.")
+    key = api_key(cfg, provider)
+    if not key:
+        raise SearchError("No API key saved for %s. Open Settings > Email & phone finder, paste your key and click Save."
+                          % NAMES[provider], fatal=True)
+    fn = hunter_find if provider == "hunter" else apollo_match
+    attempt = 0
+    while True:
+        try:
+            found = fn(key, p, want)
+            break
+        except SearchError as e:
+            if e.retryable and attempt < len(RETRY_DELAYS):
+                time.sleep(RETRY_DELAYS[attempt] * (1 + random.random() * 0.3))
+                attempt += 1
+                continue
+            raise
+    with _lock:
+        _stats["contact_calls"] = _stats.get("contact_calls", 0) + 1
+    return dict(found, ok=True, provider=provider)
+
+
+def contact_batch_start(cfg, payload):
+    if cfg["contactProvider"] != "fullenrich":
+        raise SearchError("Batches are only used with FullEnrich.")
+    key = api_key(cfg, "fullenrich")
+    if not key:
+        raise SearchError("No API key saved for FullEnrich. Open Settings > Email & phone finder, paste your key "
+                          "and click Save.", fatal=True)
+    people = payload.get("people")
+    if not isinstance(people, list) or not 1 <= len(people) <= 100:
+        raise SearchError("Send between 1 and 100 people per batch.")
+    want = payload.get("want") if isinstance(payload.get("want"), dict) else {}
+    want = {"email": bool(want.get("email")), "phone": bool(want.get("phone"))}
+    if not want["email"] and not want["phone"]:
+        raise SearchError("Nothing to look up.")
+    return {"ok": True, "job": fullenrich_start(key, [clean_person(x) for x in people], want)}
+
+
+def contact_batch_poll(cfg, payload):
+    key = api_key(cfg, "fullenrich")
+    if not key:
+        raise SearchError("No API key saved for FullEnrich.", fatal=True)
+    return dict(fullenrich_poll(key, str(payload.get("job") or "")), ok=True)
+
+
+def test_contact_provider(cfg):
+    provider = cfg["contactProvider"]
+    if provider == "mock":
+        return {"ok": True, "message": "Mock mode: emails and phone numbers are made up and cost nothing."}
+    key = api_key(cfg, provider)
+    if not key:
+        return {"ok": False, "message": "No API key saved yet."}
+    try:
+        if provider == "hunter":
+            status, data, text = http_json(HUNTER_BASE + "/v2/account", headers={"X-API-KEY": key})
+            if status != 200 or not isinstance(data, dict):
+                raise upstream_error("hunter", status, data, text)
+            d = data.get("data") if isinstance(data.get("data"), dict) else {}
+            searches = ((d.get("requests") or {}).get("searches") or {}) if isinstance(d.get("requests"), dict) else {}
+            msg = "Hunter key works."
+            if searches.get("available") is not None:
+                msg += " Searches used: %s of %s." % (searches.get("used", "?"), searches.get("available"))
+            return {"ok": True, "message": msg}
+        if provider == "apollo":
+            status, data, text = http_json(APOLLO_BASE + "/v1/auth/health", headers={"x-api-key": key})
+            if status == 200 and isinstance(data, dict) and data.get("is_logged_in") is not False:
+                return {"ok": True, "message": "Apollo key works."}
+            if status in (401, 403) or (isinstance(data, dict) and data.get("is_logged_in") is False):
+                raise upstream_error("apollo", 401 if status == 200 else status, data, text or "Invalid API key")
+            return {"ok": True, "message": "Apollo answered (HTTP %d) but could not confirm the key - "
+                                           "try a 1-lead test." % status}
+        for path in ("/api/v2/account/credits", "/api/v1/account/credits"):
+            status, data, text = http_json(FULLENRICH_BASE + path, headers={"Authorization": "Bearer " + key})
+            if status == 200 and isinstance(data, dict):
+                bal = data.get("balance", data.get("credits"))
+                return {"ok": True, "message": "FullEnrich key works." + (" Credits left: %s." % bal if bal is not None else "")}
+            if status in (401, 403):
+                raise upstream_error("fullenrich", status, data, text)
+        return {"ok": True, "message": "FullEnrich answered but could not confirm the key - try a 1-lead test."}
+    except SearchError as e:
+        return {"ok": False, "message": e.message}
+
+
 # ------------------------------------------------------------------ HTTP handler
 
 class Handler(BaseHTTPRequestHandler):
@@ -612,6 +884,20 @@ class Handler(BaseHTTPRequestHandler):
                         log("search error: %s" % e.message)
                     return self._json(200, {"ok": False, "error": e.message, "fatal": e.fatal,
                                             "retryable": e.retryable})
+            if path in ("/api/contact", "/api/contact/start", "/api/contact/poll"):
+                payload = self._read_json(MAX_BODY_BYTES)
+                fn = {"/api/contact": contact_one, "/api/contact/start": contact_batch_start,
+                      "/api/contact/poll": contact_batch_poll}[path]
+                try:
+                    return self._json(200, fn(load_config(), payload))
+                except SearchError as e:
+                    if e.fatal or e.status:
+                        log("contact lookup error: %s" % e.message)
+                    return self._json(200, {"ok": False, "error": e.message, "fatal": e.fatal,
+                                            "retryable": e.retryable})
+            if path == "/api/contact/test":
+                self._read_json(MAX_BODY_BYTES)
+                return self._json(200, test_contact_provider(load_config()))
             if path == "/api/config":
                 payload = self._read_json(MAX_BODY_BYTES)
                 cfg = load_config()
@@ -619,10 +905,14 @@ class Handler(BaseHTTPRequestHandler):
                     if payload["provider"] not in PROVIDERS:
                         return self._json(400, {"ok": False, "error": "Unknown provider."})
                     cfg["provider"] = payload["provider"]
+                if payload.get("contactProvider") is not None:
+                    if payload["contactProvider"] not in CONTACT_PROVIDERS:
+                        return self._json(400, {"ok": False, "error": "Unknown email/phone provider."})
+                    cfg["contactProvider"] = payload["contactProvider"]
                 if payload.get("key") is not None:
                     target = payload.get("keyProvider") or cfg["provider"]
-                    if target not in ("serpapi", "serper"):
-                        return self._json(400, {"ok": False, "error": "Keys are only used by SerpApi and Serper."})
+                    if target not in KEYED:
+                        return self._json(400, {"ok": False, "error": "That service does not use a key."})
                     key = str(payload["key"]).strip()
                     if len(key) > 256 or re.search(r"\s", key):
                         return self._json(400, {"ok": False, "error": "That does not look like an API key."})
@@ -650,10 +940,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _config_view(self, cfg):
         keys = {}
-        for p in ("serpapi", "serper"):
+        for p in KEYED:
             k = api_key(cfg, p)
             keys[p] = {"set": bool(k), "masked": mask(k), "fromEnv": bool(os.environ.get(ENV_KEYS[p], "").strip())}
-        return {"provider": cfg["provider"], "keys": keys}
+        return {"provider": cfg["provider"], "contactProvider": cfg["contactProvider"], "keys": keys}
 
     def _api_get(self, path):
         if path == "/api/health":

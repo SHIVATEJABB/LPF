@@ -23,6 +23,9 @@
     { key: 'location', label: 'Location', width: 28 },
     { key: 'url', label: 'LinkedIn URL', type: 'url', width: 48 },
     { key: 'email', label: 'Email', width: 30 },
+    { key: 'emailStatus', label: 'Email Status', width: 14 },
+    { key: 'phone', label: 'Phone', width: 18 },
+    { key: 'contactSource', label: 'Email/Phone Source', width: 16 },
     { key: 'website', label: 'Company Website', type: 'url', width: 32 },
     { key: 'companyUrl', label: 'Company LinkedIn URL', type: 'url', width: 45 },
     { key: 'companyIndustry', label: 'Company Industry', width: 24 },
@@ -40,7 +43,7 @@
     { key: 'source', label: 'Source', width: 16 },
     { key: 'note', label: 'Notes', width: 40 },
   ];
-  const DEFAULT_EXPORT = ['no', 'name', 'firstName', 'lastName', 'title', 'company', 'location', 'url', 'email',
+  const DEFAULT_EXPORT = ['no', 'name', 'firstName', 'lastName', 'title', 'company', 'location', 'url', 'email', 'emailStatus', 'phone',
     'website', 'companyUrl', 'companyIndustry', 'companySize', 'companyHq', 'liTitle', 'liCompany',
     'statusText', 'confidence', 'match', 'degree', 'query', 'source', 'note'];
 
@@ -58,6 +61,7 @@
 
   const DEFAULTS = {
     maxLeads: 0, startRow: 1, resultsPerQuery: 10, maxQueriesPerLead: 2, onlyNew: true, findWebsite: true, findCompanyPage: true,
+    findEmail: false, findPhone: false, contactReview: false,
     gl: '', hl: 'en', concurrency: 2, delayMs: 300, matchMin: 75, reviewMin: 50, cacheDays: 30,
     templates: C.DEFAULT_TEMPLATES.join('\n'),
     exportScope: 'all', exportColumns: DEFAULT_EXPORT.slice(),
@@ -69,7 +73,7 @@
 
   // ---------------------------------------------------------------- state
 
-  const state = { rows: [], companies: [], companyInfo: {}, nextId: 1, settings: clone(DEFAULTS) };
+  const state = { rows: [], companies: [], companyInfo: {}, contactJobs: [], nextId: 1, settings: clone(DEFAULTS) };
   const view = { filter: 'all', search: '', page: 1, pageSize: 100, open: new Set(), cpage: 1 };
   const run = newRun();
   let server = { ok: false, provider: '', keys: {} };
@@ -110,7 +114,8 @@
 
   const ROW_FIELDS = ['name', 'firstName', 'lastName', 'title', 'company', 'location', 'degree', 'source', 'url',
     'status', 'resultTitle', 'snippet', 'query', 'note', 'error', 'match', 'email',
-    'liTitle', 'liCompany', 'liLocation', 'companyUrl', 'website', 'companyIndustry', 'companySize', 'companyHq'];
+    'liTitle', 'liCompany', 'liLocation', 'companyUrl', 'website', 'companyIndustry', 'companySize', 'companyHq',
+    'phone', 'emailStatus', 'contactSource', 'contactTried'];
   const COMPANY_FIELDS = ['name', 'url', 'industry', 'size', 'sizeBucket', 'hq', 'followers', 'website', 'snippet', 'query'];
 
   function sanitizeCompany(c, id) {
@@ -206,7 +211,30 @@
       const k = server.keys[server.provider];
       $('keyRow').hidden = server.provider === 'mock';
       $('keyState').textContent = k && k.set ? '(saved: ' + k.masked + (k.fromEnv ? ', from environment variable' : '') + ')' : '(not saved yet)';
+      const cp = server.contactProvider || 'hunter';
+      const ck = server.keys[cp];
+      $('contactProvider').value = cp;
+      $('contactKeyRow').hidden = cp === 'mock';
+      $('contactKeyState').textContent = ck && ck.set ? '(saved: ' + ck.masked + (ck.fromEnv ? ', from environment variable' : '') + ')' : '(not saved yet)';
     }
+    renderContactNote();
+  }
+
+  const CONTACT_NAMES = { hunter: 'Hunter', apollo: 'Apollo', fullenrich: 'FullEnrich', mock: 'Mock mode' };
+
+  // What each email/phone provider can find through this tool.
+  function contactCan(provider) {
+    return { email: true, phone: provider === 'fullenrich' || provider === 'mock' || provider === 'hunter' };
+  }
+
+  function renderContactNote() {
+    const cp = server.contactProvider || 'hunter';
+    let note = 'Provider: ' + CONTACT_NAMES[cp] + ' (change it in Settings).';
+    if (cp === 'hunter') note += ' Hunter finds emails; phone numbers only when they are public.';
+    if (cp === 'apollo') note += ' Apollo finds emails here; for phone numbers choose FullEnrich.';
+    if (cp === 'mock') note += ' Mock mode: made-up emails and numbers, no credits.';
+    if (cp !== 'mock' && !(server.keys && server.keys[cp] && server.keys[cp].set)) note += ' No API key saved yet.';
+    $('contactNote').textContent = note;
   }
 
   // ---------------------------------------------------------------- persistence
@@ -226,7 +254,7 @@
       try { localStorage.setItem('llf-settings', JSON.stringify(state.settings)); } catch (e) { /* storage unavailable */ }
       const payload = {
         version: 2, savedAt: Date.now(), nextId: state.nextId, settings: state.settings, companies: state.companies,
-        companyInfo: state.companyInfo,
+        companyInfo: state.companyInfo, contactJobs: state.contactJobs,
         rows: state.rows.map(r => Object.assign({}, r, { status: r.status === 'Searching' ? 'Pending' : r.status })),
       };
       if (server.ok) {
@@ -271,6 +299,10 @@
         info.pageDone = !!v.pageDone;
         state.companyInfo[k] = info;
       });
+    }
+    if (saved && Array.isArray(saved.contactJobs)) {
+      state.contactJobs = saved.contactJobs.filter(j => j && typeof j.job === 'string' && Array.isArray(j.ids))
+        .map(j => ({ job: j.job, ids: j.ids.map(String), want: { email: !!(j.want && j.want.email), phone: !!(j.want && j.want.phone) }, started: Number(j.started) || 0 }));
     }
     if (saved && Array.isArray(saved.companies)) {
       state.companies = saved.companies.filter(c => c && c.name && c.url).map(c => sanitizeCompany(c, state.nextId++));
@@ -340,6 +372,9 @@
     NUMBER_FIELDS.forEach(([id, key]) => { $(id).value = s[key]; });
     $('onlyNew').checked = !!s.onlyNew;
     $('findWebsite').checked = !!s.findWebsite;
+    $('findEmail').checked = !!s.findEmail;
+    $('findPhone').checked = !!s.findPhone;
+    $('contactReview').checked = !!s.contactReview;
     $('findCompanyPage').checked = !!s.findCompanyPage;
     $('gl').value = s.gl;
     $('hl').value = s.hl;
@@ -367,7 +402,7 @@
       });
     });
     $('onlyNew').addEventListener('change', () => { state.settings.onlyNew = $('onlyNew').checked; updateEstimate(); scheduleSave(); });
-    ['findWebsite', 'findCompanyPage'].forEach(id => $(id).addEventListener('change', () => {
+    ['findWebsite', 'findCompanyPage', 'findEmail', 'findPhone', 'contactReview'].forEach(id => $(id).addEventListener('change', () => {
       state.settings[id] = $(id).checked;
       updateEstimate();
       scheduleSave();
@@ -426,6 +461,33 @@
     server = Object.assign({}, server, res, { ok: true });
     renderServer();
     setMsg('testMsg', 'Key saved. Click “Test connection” to check it.', 'ok');
+  }
+
+  async function changeContactProvider() {
+    const res = await api('/api/config', { contactProvider: $('contactProvider').value });
+    if (!res.ok) { setMsg('contactMsg', res.error, 'bad'); return; }
+    server = Object.assign({}, server, res, { ok: true });
+    setMsg('contactMsg', $('contactProvider').value === 'mock' ? 'Mock mode on: emails and numbers are made up and cost nothing.' : '', 'ok');
+    renderServer();
+    updateEstimate();
+  }
+
+  async function saveContactKey() {
+    const key = $('contactKey').value.trim();
+    if (!key) { setMsg('contactMsg', 'Paste your API key first.', 'bad'); return; }
+    const res = await api('/api/config', { key, keyProvider: $('contactProvider').value });
+    if (!res.ok) { setMsg('contactMsg', res.error, 'bad'); return; }
+    $('contactKey').value = '';
+    server = Object.assign({}, server, res, { ok: true });
+    renderServer();
+    setMsg('contactMsg', 'Key saved. Click “Test connection” to check it.', 'ok');
+  }
+
+  async function testContactKey() {
+    if ($('contactKey').value.trim()) await saveContactKey();
+    setMsg('contactMsg', 'Testing…');
+    const res = await api('/api/contact/test', {});
+    setMsg('contactMsg', res.message || res.error || 'No answer.', res.ok ? 'ok' : 'bad');
   }
 
   async function testKey() {
@@ -540,7 +602,7 @@
     const cos = companiesToLookUp(findTargets());
     const coCredits = cos.length * companySearchesEach();
     setMsg('estimate', plural(n, 'lead') + ' will be searched · about ' + n * pages + '–' + n * pages * maxQ
-      + ' Google searches (credits)' + (coCredits ? ' + up to ' + coCredits + ' for ' + plural(cos.length, 'company').replace('companys', 'companies') + ' (website, LinkedIn page)' : '')
+      + ' Google searches (credits)' + contactEstimateText(findTargets()) + (coCredits ? ' + up to ' + coCredits + ' for ' + plural(cos.length, 'company').replace('companys', 'companies') + ' (website, LinkedIn page)' : '')
       + '. Cached repeats are free.');
   }
 
@@ -728,7 +790,8 @@
     renderAll();
     await saveNow();
     const cost = run.credits + ' search credit' + (run.credits === 1 ? '' : 's') + ' used'
-      + (run.cached ? ', ' + run.cached + ' answered from cache' : '');
+      + (run.cached ? ', ' + run.cached + ' answered from cache' : '')
+      + (run.contactCalls ? ', ' + run.contactCalls + ' email/phone ' + (run.contactCalls === 1 ? 'request' : 'requests') : '');
     if (run.fatal) {
       showBanner('error', 'Search stopped: ' + run.fatal + ' (' + cost + '.) Nothing else was searched, so no more credits were spent.');
     } else {
@@ -748,7 +811,9 @@
     if (server.provider !== 'mock' && maxCredits > 50 && !rows
       && !window.confirm('Search ' + plural(targets.length, 'lead')
         + (coCount ? ' and look up ' + plural(coCount, 'company').replace('companys', 'companies') : '')
-        + '? This can use up to ' + maxCredits + ' search credits (usually far fewer). Searches already cached are free.')) return;
+        + '? This can use up to ' + maxCredits + ' search credits (usually far fewer). Searches already cached are free.'
+        + (contactWants().any ? ' Email/phone lookups for the matched leads use your ' + CONTACT_NAMES[server.contactProvider || 'hunter'] + ' credits.' : ''))) return;
+    if (!rows && contactWants().any && !contactReady(true)) return;
     startRun('find', targets.length);
     await runPool(targets, async row => {
       await processRow(row);
@@ -759,9 +824,197 @@
     }, s.concurrency);
     let coSummary = '';
     if (!rows && !run.stop && companySearchesEach()) coSummary = await lookUpCompanies(companiesToLookUp(targets));
+    let contactSummary = '';
+    if (!rows && !run.stop && contactWants().any) contactSummary = await lookUpContacts(contactTargets(targets));
     const c = countStatuses(targets);
     await finishRun(c.matched + ' matched, ' + c.review + ' to review, ' + c.notfound + ' not found'
-      + (c.error ? ', ' + c.error + ' errors' : '') + '.' + (coSummary ? ' ' + coSummary : ''));
+      + (c.error ? ', ' + c.error + ' errors' : '') + '.' + (coSummary ? ' ' + coSummary : '') + (contactSummary ? ' ' + contactSummary : ''));
+  }
+
+  // ---------------------------------------------------------------- emails & phone numbers
+
+  function contactWants() {
+    const s = state.settings;
+    const can = contactCan(server.contactProvider || 'hunter');
+    const want = { email: !!s.findEmail && can.email, phone: !!s.findPhone && can.phone };
+    want.any = want.email || want.phone;
+    return want;
+  }
+
+  function contactReady(openIfNot) {
+    const cp = server.contactProvider || 'hunter';
+    if (!server.ok) {
+      showBanner('error', 'The local server is not connected. Start START_HERE.py and reload this page.');
+      return false;
+    }
+    if (cp === 'mock' || (server.keys[cp] && server.keys[cp].set)) return true;
+    if (openIfNot) {
+      openSettings();
+      setMsg('contactMsg', 'Save your ' + CONTACT_NAMES[cp] + ' API key first (Email & phone finder), or choose Mock test mode.', 'bad');
+    }
+    return false;
+  }
+
+  function contactTried(r, field) {
+    return (' ' + r.contactTried + ' ').includes(' ' + (server.contactProvider || 'hunter') + ':' + field + ' ');
+  }
+
+  function markTried(r, field) {
+    if (!contactTried(r, field)) r.contactTried = C.normSpace(r.contactTried + ' ' + (server.contactProvider || 'hunter') + ':' + field);
+  }
+
+  // Matched leads (and Review if ticked) that still need an email or phone from this provider.
+  function contactTargets(rows) {
+    const want = contactWants();
+    if (!want.any) return [];
+    const pending = new Set();
+    state.contactJobs.forEach(j => j.ids.forEach(id => pending.add(id)));
+    const ok = { Matched: 1, Manual: 1, Found: 1, Review: state.settings.contactReview ? 1 : 0 };
+    return rows.filter(r => ok[r.status] && !pending.has(String(r.id))
+      && ((want.email && !r.email && !contactTried(r, 'email')) || (want.phone && !r.phone && !contactTried(r, 'phone'))));
+  }
+
+  function contactEstimateText(rows) {
+    const want = contactWants();
+    if (!want.any) return '';
+    return ' + email/phone lookups for the leads that get matched (' + CONTACT_NAMES[server.contactProvider || 'hunter'] + ' credits)';
+  }
+
+  function personFor(r) {
+    const clean = C.cleanPersonName(r.name);
+    const tokens = clean.split(' ').filter(t => t && !/^\p{L}\.?$/u.test(t));
+    const domain = C.hostOf(r.website || '');
+    return {
+      id: String(r.id), full: clean,
+      first: (r.firstName || tokens[0] || '').replace(/\.$/, ''),
+      last: tokens.length > 1 ? tokens[tokens.length - 1] : '',
+      company: r.company || r.liCompany || '', domain,
+      linkedin: /linkedin\.com\/(in|pub)\//.test(r.url) ? r.url : '',
+    };
+  }
+
+  function applyContact(r, res, want) {
+    let found = false;
+    if (want.email) {
+      if (res.email && !r.email) { r.email = res.email; r.emailStatus = res.emailStatus || ''; found = true; }
+      markTried(r, 'email');
+    }
+    if (want.phone) {
+      if (res.phone && !r.phone) { r.phone = res.phone; found = true; }
+      markTried(r, 'phone');
+    }
+    if (found) r.contactSource = CONTACT_NAMES[server.contactProvider || 'hunter'];
+    return found;
+  }
+
+  async function doContact(path, body) {
+    const resp = await api(path, body);
+    if (resp.ok) {
+      run.consecutiveErrors = 0;
+      if (server.contactProvider !== 'mock') run.contactCalls = (run.contactCalls || 0) + 1;
+    } else {
+      run.errors++;
+      run.consecutiveErrors++;
+      if (resp.fatal || resp.offline) {
+        run.stop = true;
+        run.fatal = resp.error;
+      } else if (run.consecutiveErrors >= 5 && !run.paused) {
+        run.paused = true;
+        showBanner('error', '5 email/phone lookups failed in a row, so the run is paused. Last error: ' + resp.error
+          + ' Fix the problem, then press Resume.');
+        renderRunButtons();
+      }
+    }
+    return resp;
+  }
+
+  async function pollContactJob(job) {
+    const deadline = Date.now() + 20 * 60 * 1000;
+    while (!run.stop && Date.now() < deadline) {
+      await waitIfPaused();
+      const resp = await doContact('/api/contact/poll', { job: job.job });
+      if (!resp.ok) { if (run.stop) return false; await sleep(10000); continue; }
+      if (!resp.done) { await sleep(5000); continue; }
+      const byId = new Map(state.rows.map(r => [String(r.id), r]));
+      (resp.results || []).forEach(res => {
+        const r = byId.get(res.id) || byId.get(job.ids[res.index]);
+        if (r) applyContact(r, res, job.want);
+      });
+      job.ids.forEach(id => {
+        const r = byId.get(id);
+        if (r) { if (job.want.email) markTried(r, 'email'); if (job.want.phone) markTried(r, 'phone'); }
+      });
+      state.contactJobs.splice(state.contactJobs.indexOf(job), 1);
+      return true;
+    }
+    return false;
+  }
+
+  // Runs inside a search run (after people and companies) or on its own from the button.
+  async function lookUpContacts(list) {
+    const want = contactWants();
+    const cp = server.contactProvider || 'hunter';
+    if (!want.any || (!list.length && !state.contactJobs.length)) return '';
+    run.kind = 'contacts';
+    run.total = list.length;
+    run.done = 0;
+    renderProgress();
+    const before = new Map(list.map(r => [r, { e: r.email, p: r.phone }]));
+    if (cp === 'fullenrich') {
+      // Finish batches from an earlier run first, so nobody is paid for twice.
+      for (const job of state.contactJobs.slice()) { if (run.stop) break; await pollContactJob(job); }
+      for (let i = 0; i < list.length && !run.stop; i += 100) {
+        await waitIfPaused();
+        const chunk = list.slice(i, i + 100);
+        const resp = await doContact('/api/contact/start', { people: chunk.map(personFor), want: { email: want.email, phone: want.phone } });
+        if (!resp.ok) break;
+        const job = { job: resp.job, ids: chunk.map(r => String(r.id)), want: { email: want.email, phone: want.phone }, started: Date.now() };
+        state.contactJobs.push(job);
+        await saveNow();
+        await pollContactJob(job);
+        run.done = Math.min(list.length, i + chunk.length);
+        renderProgress();
+        scheduleRender();
+        scheduleSave();
+      }
+    } else {
+      await runPool(list, async r => {
+        await waitIfPaused();
+        if (run.stop) return;
+        const resp = await doContact('/api/contact', { person: personFor(r), want: { email: want.email, phone: want.phone } });
+        if (resp.ok) applyContact(r, resp, want);
+        run.done++;
+        renderProgress();
+        scheduleRender();
+        scheduleSave();
+      }, Math.min(state.settings.concurrency, 3));
+    }
+    let emails = 0, phones = 0;
+    before.forEach((b, r) => { if (!b.e && r.email) emails++; if (!b.p && r.phone) phones++; });
+    let text = 'Contacts: ' + emails + ' emails' + (want.phone ? ' and ' + phones + ' phone numbers' : '') + ' found for ' + plural(list.length, 'lead') + '.';
+    if (state.contactJobs.length) text += ' FullEnrich is still working on ' + plural(state.contactJobs.reduce((n, j) => n + j.ids.length, 0), 'lead') + ' – click “Find emails & phones only” later to collect them (no extra credits).';
+    return text;
+  }
+
+  async function runContactDetails() {
+    const want = contactWants();
+    if (!want.any) {
+      toast('Tick “Email” and/or “Phone number” in section 2 first.');
+      return;
+    }
+    if (run.active || !contactReady(true)) return;
+    const list = contactTargets(state.rows);
+    if (!list.length && !state.contactJobs.length) {
+      toast(state.rows.length ? 'No matched leads need an email or phone from this provider.' : 'Add and search some leads first.');
+      return;
+    }
+    const lookups = list.length * ((want.email ? 1 : 0) + (want.phone ? 1 : 0));
+    if (server.contactProvider !== 'mock' && lookups > 20
+      && !window.confirm('Look up ' + (want.email ? 'emails' : '') + (want.email && want.phone ? ' and ' : '') + (want.phone ? 'phone numbers' : '')
+        + ' for ' + plural(list.length, 'lead') + '? This uses your ' + CONTACT_NAMES[server.contactProvider] + ' credits – check your plan first.')) return;
+    startRun('contacts', list.length);
+    const summary = await lookUpContacts(list);
+    await finishRun(summary || 'Nothing to look up.');
   }
 
   // ---------------------------------------------------------------- company details (website, LinkedIn page)
@@ -1136,6 +1389,7 @@
   function renderRunButtons() {
     $('runBtn').disabled = run.active;
     $('companyInfoBtn').disabled = run.active;
+    $('contactBtn').disabled = run.active;
     $('xRun').disabled = run.active;
     $('cRun').disabled = run.active;
     $('cUseBtn').disabled = run.active || !state.companies.some(c => c.selected);
@@ -1156,7 +1410,8 @@
       eta = ' · about ' + (left > 90 ? Math.round(left / 60) + ' min' : left + ' s') + ' left';
     }
     const what = run.kind === 'xray' ? 'matching leads found' : run.kind === 'company' ? 'companies found'
-      : run.kind === 'companyinfo' ? 'companies looked up (website, LinkedIn page)' : 'leads searched';
+      : run.kind === 'companyinfo' ? 'companies looked up (website, LinkedIn page)'
+      : run.kind === 'contacts' ? 'leads looked up for email / phone' : 'leads searched';
     setMsg('progressText', (run.paused ? 'Paused · ' : '') + run.done + ' / ' + run.total + ' ' + what + ' · '
       + run.credits + ' credits used' + (run.cached ? ' · ' + run.cached + ' cached' : '')
       + (run.errors ? ' · ' + plural(run.errors, 'error') : '') + eta);
@@ -1204,6 +1459,8 @@
       el('span', { text: r.name }),
       r.degree ? el('span', { className: 'deg', text: r.degree }) : null,
       r.source !== 'Sales Navigator' ? el('span', { className: 'sub', text: r.source }) : null,
+      r.email ? el('span', { className: 'sub contact', text: '✉ ' + r.email + (r.emailStatus ? ' (' + r.emailStatus + ')' : '') }) : null,
+      r.phone ? el('span', { className: 'sub contact', text: '☎ ' + r.phone }) : null,
     ]));
     tr.appendChild(el('td', { text: r.title }));
     const site = safeHref(r.website), page = safeHref(r.companyUrl);
@@ -1505,6 +1762,11 @@
     $('xRun').addEventListener('click', runXray);
     $('runBtn').addEventListener('click', () => runFind());
     $('companyInfoBtn').addEventListener('click', runCompanyDetails);
+    $('contactBtn').addEventListener('click', runContactDetails);
+    $('contactProvider').addEventListener('change', changeContactProvider);
+    $('saveContactKeyBtn').addEventListener('click', saveContactKey);
+    $('testContactBtn').addEventListener('click', testContactKey);
+    $('contactKey').addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); saveContactKey(); } });
     $('pauseBtn').addEventListener('click', () => {
       run.paused = !run.paused;
       if (!run.paused) { run.consecutiveErrors = 0; hideBanner(); }
