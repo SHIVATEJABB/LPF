@@ -79,27 +79,30 @@ that is missing one of its fields (for example, no company).
 - Websites are taken from Google's info panel, or a result whose domain or home page matches the company name.
   Social, directory and news sites are never used. Check websites for very short or common company names.
 
-### Emails & phone numbers (optional, uses a provider's credits)
+### Emails & phone numbers
 
-The tool can ask an email/phone data provider for each **matched** lead (Review rows only if you tick it):
+Tick **Email** and/or **Phone number** in section 2 (off by default). The default finder is **Free** – no extra account:
 
-| Provider | Finds | How it works |
-|---|---|---|
-| **Hunter** (hunter.io) | Emails (phone only when public) | One request per lead, using name + company website |
-| **Apollo** (apollo.io) | Emails | One request per lead, using name, company, website and LinkedIn URL |
-| **FullEnrich** (fullenrich.com) | Emails **and phone numbers** | Batches of up to 100 leads; results arrive after a few minutes |
-| **Mock test mode** | Made-up contacts | Free, for trying the tool |
+1. **Company website (free):** the tool reads up to 6 public pages of each company's website (home, contact, about,
+   team, leadership…), respecting the site's robots.txt, and collects published emails – including "name [at] company
+   [dot] com" and Cloudflare-hidden ones – and phone numbers.
+2. **Google (your search credits):** one search per company for `"@company.com"` finds emails published anywhere on the
+   web. Optional: one search per person (off by default).
+3. **Matching:** an email is given to a lead only when it fits their name (e.g. `jsmith@` for John Smith; `smith@` or a
+   Gmail address only when the full name is printed next to it).
+4. **Guesses:** from the emails found, the tool works out the company's format (e.g. `first.last@`) and puts a
+   **guessed** email in its own column, with the reason. No guesses for domains that cannot receive email
+   (checked free through public DNS).
 
-1. **⚙ Settings → Email & phone finder:** choose the provider, paste its API key, **Save key**, **Test connection**.
-2. In section 2 tick **Email** and/or **Phone number**. They are off by default, so nothing is spent unless you tick them.
-3. Run **▶ Start search** (looks up contacts after the profiles), or **Find emails & phones only** for leads you already searched.
+Columns: **Email** (found published), **Email Status** (where), **Email (guessed)**, **Guess Based On**, **Phone**
+(direct number printed next to the person's name), **Company Phone**, **Company Emails** (info@, sales@…).
 
-- Emails already in your list are never replaced. Each lead is only looked up once per provider.
-- A wrong key or empty credit balance stops the run straight away.
-- FullEnrich keeps working if you close the page: click **Find emails & phones only** later to collect the results
-  without paying again.
-- New columns: **Email**, **Email Status**, **Phone**, **Email/Phone Source**.
-- Check the rules for cold email where your leads are (e.g. CAN-SPAM in the US, GDPR in the EU/UK).
+Good to know: personal mobile numbers are rarely published, so expect mostly company phone numbers. Large companies
+seldom list staff emails, so they mostly get guesses. Check guessed emails before sending. Each company is read once and
+remembered.
+
+Paid alternatives (need your own account and key, in **⚙ Settings → Email & phone finder**): Hunter (emails),
+Apollo (emails), FullEnrich (emails + phones, in batches). **Mock test mode** makes up contacts for free.
 
 ### What the statuses mean
 

@@ -280,6 +280,7 @@
         <legend>Email &amp; phone finder</legend>
         <label>Provider
           <select id="contactProvider">
+            <option value="free">Free – company websites + Google (no extra account)</option>
             <option value="hunter">Hunter (hunter.io) – emails</option>
             <option value="apollo">Apollo (apollo.io) – emails</option>
             <option value="fullenrich">FullEnrich (fullenrich.com) – emails + phone numbers</option>
@@ -294,9 +295,19 @@
             <button type="button" id="testContactBtn" class="btn">Test connection</button>
           </div>
         </div>
+        <div id="freeOptions" hidden>
+          <label class="check"><input type="checkbox" id="freeGoogle"> Search Google for published emails at each company (1 search credit per company)</label>
+          <label class="check"><input type="checkbox" id="freePerson"> Also search Google for each person's email (1 search credit per person)</label>
+          <label class="check"><input type="checkbox" id="freeGuess"> Suggest likely emails from the company's email pattern (shown as “guessed”)</label>
+          <label>Pages to read on each company website <small>1–15 (contact, about, team…)</small>
+            <input id="freePages" type="number" min="1" max="15" step="1"></label>
+        </div>
         <div class="row"><span id="contactMsg" class="msg"></span></div>
-        <p class="hint small">Only used when you tick <b>Email</b> or <b>Phone number</b> in section 2. Every lookup uses your
-          provider's credits (free plans are small). Emails you already have are never replaced.</p>
+        <p class="hint small">Only used when you tick <b>Email</b> or <b>Phone number</b> in section 2. <b>Free</b> reads the public
+          contact, about and team pages of each company website (respecting their robots.txt) and searches Google for emails
+          published at the company's domain. Guessed emails go in their own column – check them before sending. Personal mobile
+          numbers are rarely public, so expect mostly company phone numbers. The other providers need their own paid account.
+          Emails you already have are never replaced.</p>
       </fieldset>
 
       <fieldset>

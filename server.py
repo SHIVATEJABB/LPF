@@ -12,6 +12,8 @@ Uses only the Python standard library: nothing to pip install.
 
 import argparse
 import hashlib
+import http.client
+import ipaddress
 import json
 import os
 import random
@@ -25,10 +27,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import urllib.robotparser
 import webbrowser
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
 DATA_DIR = os.environ.get("LLF_DATA_DIR") or os.path.join(APP_DIR, "data")
@@ -38,12 +42,12 @@ HUNTER_BASE = os.environ.get("LLF_HUNTER_URL", "https://api.hunter.io").rstrip("
 APOLLO_BASE = os.environ.get("LLF_APOLLO_URL", "https://api.apollo.io").rstrip("/")
 FULLENRICH_BASE = os.environ.get("LLF_FULLENRICH_URL", "https://app.fullenrich.com").rstrip("/")
 PROVIDERS = ("serpapi", "serper", "mock")
-CONTACT_PROVIDERS = ("hunter", "apollo", "fullenrich", "mock")
+CONTACT_PROVIDERS = ("free", "hunter", "apollo", "fullenrich", "mock")
 KEYED = ("serpapi", "serper", "hunter", "apollo", "fullenrich")
 ENV_KEYS = {"serpapi": "SERPAPI_KEY", "serper": "SERPER_API_KEY", "hunter": "HUNTER_API_KEY",
             "apollo": "APOLLO_API_KEY", "fullenrich": "FULLENRICH_API_KEY"}
 NAMES = {"serpapi": "SerpApi", "serper": "Serper", "hunter": "Hunter", "apollo": "Apollo", "fullenrich": "FullEnrich",
-         "mock": "Mock mode"}
+         "mock": "Mock mode", "free": "Free (websites + Google)"}
 UPSTREAM_TIMEOUT = 30
 RETRY_DELAYS = (1.5, 4.0)
 MAX_STATE_BYTES = 80 * 1024 * 1024
@@ -81,7 +85,7 @@ def _config_path():
 
 
 def load_config():
-    cfg = {"provider": "serpapi", "contactProvider": "hunter", "keys": dict((k, "") for k in KEYED)}
+    cfg = {"provider": "serpapi", "contactProvider": "free", "keys": dict((k, "") for k in KEYED)}
     try:
         with open(_config_path(), "r", encoding="utf-8") as f:
             saved = json.load(f)
@@ -270,8 +274,17 @@ def knowledge_panel(kg):
     if not website and isinstance(kg.get("source"), dict):
         website = kg["source"].get("link") or ""
     if not isinstance(website, str) or not website.startswith("http"):
+        website = ""
+    phone = kg.get("phone") or kg.get("phoneNumber") or ""
+    attrs = kg.get("attributes") if isinstance(kg.get("attributes"), dict) else {}
+    for k, v in attrs.items():
+        if not phone and isinstance(v, str) and re.search(r"phone|customer service", str(k), re.I):
+            phone = v
+    if not isinstance(phone, str):
+        phone = ""
+    if not website and not phone:
         return None
-    return {"title": str(kg.get("title") or ""), "website": website}
+    return {"title": str(kg.get("title") or ""), "website": website, "phone": phone.strip()[:40]}
 
 
 def search_serpapi(key, query, page, gl, hl):
@@ -349,6 +362,14 @@ def search_mock(query, page, mode, meta=None):
         {"title": "Mock Company | LinkedIn", "link": "https://www.linkedin.com/company/mock-company",
          "snippet": "Company page (should be ignored).", "extras": []},
     ]
+    if mode == "web" and '"@' in query:
+        domain = re.search(r'"@([^"]+)"', query).group(1)
+        h = _h("emails|" + domain)
+        if h % 3 == 2:
+            return [], False, None
+        return [{"title": "Contact - %s" % domain, "link": "https://www.%s/contact" % domain,
+                 "snippet": "Email sales@%s or alex.morgan@%s for quotes. Directory listing (mock)." % (domain, domain),
+                 "extras": []}], False, {"title": domain, "website": "", "phone": "+1 (737) 555-%04d" % (h % 10000)}
     if mode == "web":
         company = str(meta.get("company") or (phrases[0] if phrases else "Mock Company"))
         h = _h("web|" + company)
@@ -696,8 +717,8 @@ def contact_one(cfg, payload):
     p = clean_person(payload.get("person"))
     if provider == "mock":
         return dict(mock_contact(p, want), ok=True, provider="mock")
-    if provider == "fullenrich":
-        raise SearchError("FullEnrich works in batches - reload the page and try again.")
+    if provider in ("fullenrich", "free"):
+        raise SearchError("This finder works per company - reload the page and try again.")
     key = api_key(cfg, provider)
     if not key:
         raise SearchError("No API key saved for %s. Open Settings > Email & phone finder, paste your key and click Save."
@@ -747,6 +768,8 @@ def test_contact_provider(cfg):
     provider = cfg["contactProvider"]
     if provider == "mock":
         return {"ok": True, "message": "Mock mode: emails and phone numbers are made up and cost nothing."}
+    if provider == "free":
+        return {"ok": True, "message": "Free mode needs no key: it reads company websites and uses your Google search provider."}
     key = api_key(cfg, provider)
     if not key:
         return {"ok": False, "message": "No API key saved yet."}
@@ -779,6 +802,370 @@ def test_contact_provider(cfg):
         return {"ok": True, "message": "FullEnrich answered but could not confirm the key - try a 1-lead test."}
     except SearchError as e:
         return {"ok": False, "message": e.message}
+
+
+# ------------------------------------------------------------------ free contact finder: company websites
+
+SITE_AGENT = "LPF-LeadFinder"
+SITE_UA = "Mozilla/5.0 (compatible; %s/%s; reads public contact pages)" % (SITE_AGENT, VERSION)
+SITE_PAGE_BYTES = 1500000
+SITE_PAGE_TIMEOUT = 10
+SITE_BUDGET_SECONDS = 45
+ALLOW_PRIVATE_FETCH = os.environ.get("LLF_ALLOW_PRIVATE_FETCH") == "1"  # tests only
+DOH_URLS = [u for u in (os.environ.get("LLF_DOH_URL"), "https://dns.google/resolve",
+                        "https://cloudflare-dns.com/dns-query") if u]
+CONTACT_LINK = re.compile(r"contact|about|team|leadership|management|people|staff|who-we-are|our-company|executive|"
+                          r"board|founder|our-story|directory|kontakt|impressum|meet", re.I)
+FALLBACK_PATHS = ("/contact", "/contact-us", "/about", "/about-us", "/team", "/our-team", "/leadership")
+EMAIL_TEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._%+-]{0,63}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}")
+PHONE_TEXT = re.compile(r"(?:phone|tel|telephone|call(?: us)?|mobile|cell|office|direct|main|ph)\.?\s*(?:no\.?|number)?\s*[:\-]?\s*"
+                        r"(\+?\(?\d[\d\s().\-]{6,20}\d)", re.I)
+JUNK_EMAIL = re.compile(r"\.(png|jpe?g|gif|svg|webp|css|js)$|@(example|domain|email|sentry|sentry-next|wixpress|"
+                        r"yourdomain|yoursite|company|mysite|test)\.|^(name|email|your|user|someone|firstname|"
+                        r"first\.last|john\.doe|jane\.doe)@", re.I)
+
+
+class FetchBlocked(Exception):
+    pass
+
+
+def host_is_public(host):
+    """Never read pages on this computer or the local network (a website could redirect there)."""
+    if ALLOW_PRIVATE_FETCH:
+        return True
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError):
+        return False
+    for info in infos:
+        try:
+            if not ipaddress.ip_address(info[4][0].split("%")[0]).is_global:
+                return False
+        except ValueError:
+            return False
+    return bool(infos)
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = 4
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        u = urllib.parse.urlparse(newurl)
+        if u.scheme not in ("http", "https") or not u.hostname or not host_is_public(u.hostname):
+            raise FetchBlocked("redirect to a private or invalid address")
+        return urllib.request.HTTPRedirectHandler.redirect_request(self, req, fp, code, msg, headers, newurl)
+
+
+_site_opener = urllib.request.build_opener(_SafeRedirect)
+
+
+def fetch_page(url, deadline, want="html"):
+    """Returns (final_url, text) or None. Only public addresses, limited size and time."""
+    left = deadline - time.time()
+    if left < 1:
+        return None
+    u = urllib.parse.urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname or not host_is_public(u.hostname):
+        return None
+    req = urllib.request.Request(url, headers={"User-Agent": SITE_UA, "Accept": "text/html,application/xhtml+xml,text/plain"})
+    try:
+        resp = _site_opener.open(req, timeout=max(1, min(SITE_PAGE_TIMEOUT, left)))
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if want == "html" and "html" not in ctype:
+            return None
+        raw = resp.read(SITE_PAGE_BYTES)
+        charset = resp.headers.get_content_charset() or "utf-8"
+        try:
+            text = raw.decode(charset, "replace")
+        except LookupError:
+            text = raw.decode("utf-8", "replace")
+        return resp.geturl(), text
+    except (urllib.error.URLError, http.client.HTTPException, socket.timeout, TimeoutError, OSError, FetchBlocked,
+            ValueError):
+        return None
+
+
+def decode_cfemail(hexstr):
+    """Cloudflare hides emails as data-cfemail="<hex>"; the first byte is the XOR key."""
+    try:
+        data = bytes.fromhex(hexstr.strip())
+        return bytes(b ^ data[0] for b in data[1:]).decode("utf-8", "replace")
+    except (ValueError, IndexError):
+        return ""
+
+
+class _PageParser(HTMLParser):
+    BLOCK = {"p", "div", "li", "tr", "td", "th", "br", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article",
+             "header", "footer", "address", "dd", "dt", "ul", "ol", "table"}
+
+    def __init__(self):
+        HTMLParser.__init__(self, convert_charrefs=True)
+        self.parts, self.links, self.mailto, self.tel, self.cf, self.ld = [], [], [], [], [], []
+        self.size = 0  # characters of text so far, so link-hidden emails keep their position
+        self._skip = 0
+        self._in_ld = False
+        self._a = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict((k, v or "") for k, v in attrs)
+        if tag in ("script", "style", "noscript", "svg", "template"):
+            if tag == "script" and "ld+json" in a.get("type", "").lower():
+                self._in_ld = True
+            else:
+                self._skip += 1
+            return
+        if a.get("data-cfemail"):
+            self.cf.append((a["data-cfemail"], self.size))
+        if tag in self.BLOCK:
+            self._add("\n")
+        if tag == "a":
+            href = a.get("href", "").strip()
+            low = href.lower()
+            if low.startswith("mailto:"):
+                self.mailto.append((urllib.parse.unquote(href[7:].split("?")[0]), self.size))
+            elif low.startswith("tel:"):
+                self.tel.append(urllib.parse.unquote(href[4:]))
+            elif "/cdn-cgi/l/email-protection#" in low:
+                self.cf.append((href.split("#", 1)[1], self.size))
+            elif href:
+                self._a = [href, []]
+                self.links.append(self._a)
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript", "svg", "template"):
+            if tag == "script" and self._in_ld:
+                self._in_ld = False
+            elif self._skip:
+                self._skip -= 1
+            return
+        if tag == "a":
+            self._a = None
+        if tag in self.BLOCK:
+            self._add("\n")
+
+    def _add(self, text):
+        self.parts.append(text)
+        self.size += len(text)
+
+    def handle_data(self, data):
+        if self._in_ld:
+            self.ld.append(data)
+            return
+        if self._skip:
+            return
+        self._add(data)
+        if self._a is not None:
+            self._a[1].append(data)
+
+
+def _deobfuscate(text):
+    t = re.sub(r"\s*[\[\(\{<]\s*(?:at|@)\s*[\]\)\}>]\s*", "@", text, flags=re.I)
+    t = re.sub(r"\s*[\[\(\{<]\s*dot\s*[\]\)\}>]\s*", ".", t, flags=re.I)
+    return t
+
+
+def _context(text, start, end, width=130):
+    return re.sub(r"\s+", " ", text[max(0, start - width):end + width].replace("\n", " | ")).strip()[:400]
+
+
+def _clean_email(e):
+    e = urllib.parse.unquote(e or "").strip().strip(".,;:()<>[]'\"").lower()
+    if not EMAIL_TEXT.fullmatch(e) or JUNK_EMAIL.search(e) or len(e) > 120:
+        return ""
+    return e
+
+
+def _clean_phone(raw):
+    p = re.sub(r"[^\d+()\-.\s]", "", raw or "").strip(" .-")
+    digits = re.sub(r"\D", "", p)
+    if not 7 <= len(digits) <= 15 or len(set(digits)) < 3:
+        return ""
+    return re.sub(r"\s+", " ", p)
+
+
+def extract_contacts(html_text, page_url):
+    parser = _PageParser()
+    try:
+        parser.feed(html_text)
+        parser.close()
+    except Exception:  # broken HTML: keep what was read
+        pass
+    raw_text = "".join(parser.parts)
+    text = re.sub(r"[ \t\r\f\v\u00a0]+", " ", raw_text)
+    text = re.sub(r"\n\s*(\n\s*)+", "\n", text)
+    plain = _deobfuscate(text)
+    emails, phones = {}, {}
+
+    def add_email(raw, ctx):
+        e = _clean_email(raw)
+        if e and e not in emails:
+            emails[e] = {"email": e, "page": page_url, "context": ctx}
+
+    def add_phone(raw, ctx, kind):
+        ph = _clean_phone(raw)
+        key = re.sub(r"\D", "", ph)[-10:]
+        if ph and key not in phones:
+            phones[key] = {"number": ph, "page": page_url, "context": ctx, "kind": kind}
+
+    for m in EMAIL_TEXT.finditer(plain):
+        add_email(m.group(0), _context(plain, m.start(), m.end()))
+    for raw, at in parser.mailto:
+        add_email(raw, _context(raw_text, at, at))
+    for h, at in parser.cf:
+        add_email(decode_cfemail(h), _context(raw_text, at, at))
+    for block in parser.ld:
+        for m in re.finditer(r'"email"\s*:\s*"([^"]+)"', block):
+            add_email(m.group(1).replace("mailto:", ""), "")
+        for m in re.finditer(r'"telephone"\s*:\s*"([^"]+)"', block):
+            add_phone(m.group(1), "", "listed")
+    for raw in parser.tel:
+        digits = re.sub(r"\D", "", raw)[-7:]
+        ctx = ""
+        for m in re.finditer(r"\+?\(?\d[\d\s().\-]{6,20}\d", plain):
+            if re.sub(r"\D", "", m.group(0)).endswith(digits):
+                ctx = _context(plain, m.start(), m.end())
+                break
+        add_phone(raw, ctx, "listed")
+    for m in PHONE_TEXT.finditer(plain):
+        if re.search(r"fax", plain[max(0, m.start() - 12):m.start() + 6], re.I):
+            continue
+        add_phone(m.group(1), _context(plain, m.start(1), m.end(1)), "text")
+    links = [(urllib.parse.urljoin(page_url, href), " ".join("".join(t).split())[:80]) for href, t in parser.links]
+    return list(emails.values()), list(phones.values()), links
+
+
+def _same_site(url, host):
+    h = (urllib.parse.urlparse(url).hostname or "").lower()
+    strip = lambda x: x[4:] if x.startswith("www.") else x
+    return strip(h) == strip(host) or h.endswith("." + strip(host))
+
+
+def scan_site(domain, max_pages=6, budget=SITE_BUDGET_SECONDS):
+    deadline = time.time() + budget
+    home = None
+    for start in ("https://%s/" % domain, "https://www.%s/" % domain, "http://%s/" % domain):
+        if start.startswith("https://www.www."):
+            continue
+        home = fetch_page(start, deadline)
+        if home:
+            break
+    result = {"reachable": bool(home), "pages": [], "emails": [], "phones": [], "robotsBlocked": 0}
+    if not home:
+        return result
+    home_url, home_html = home
+    host = urllib.parse.urlparse(home_url).hostname or domain
+    origin = "%s://%s" % (urllib.parse.urlparse(home_url).scheme, urllib.parse.urlparse(home_url).netloc)
+    robots = urllib.robotparser.RobotFileParser()
+    got = fetch_page(origin + "/robots.txt", deadline, want="text")
+    robots.parse(got[1].splitlines() if got and len(got[1]) < 500000 else [])
+    allowed = lambda url: robots.can_fetch(SITE_AGENT, url)
+    if not allowed(home_url):
+        result["robotsBlocked"] = 1
+        return result
+    seen_e, seen_p = {}, {}
+
+    def take(url, html_text):
+        result["pages"].append(url)
+        emails, phones, links = extract_contacts(html_text, url)
+        for e in emails:
+            seen_e.setdefault(e["email"], e)
+        for ph in phones:
+            seen_p.setdefault(re.sub(r"\D", "", ph["number"])[-10:], ph)
+        return links
+
+    links = take(home_url, home_html)
+    ranked, queued = [], set([home_url.rstrip("/")])
+    for url, label in links:
+        clean = url.split("#")[0].rstrip("/")
+        if not clean or clean in queued or not _same_site(clean, host) or re.search(r"\.(pdf|jpe?g|png|gif|zip|docx?)$", clean, re.I):
+            continue
+        hit = CONTACT_LINK.search(urllib.parse.urlparse(clean).path) or CONTACT_LINK.search(label)
+        if hit:
+            word = hit.group(0).lower()
+            score = 0 if word.startswith(("contact", "kontakt")) else 1 if word in ("team", "leadership", "management", "people", "staff", "executive", "board", "meet") else 2
+            ranked.append((score, clean))
+            queued.add(clean)
+    ranked.sort()
+    todo = [u for _, u in ranked]
+    if len(todo) < 2:
+        todo += [origin + p for p in FALLBACK_PATHS if (origin + p) not in queued]
+    for url in todo:
+        if len(result["pages"]) >= max_pages or time.time() > deadline:
+            break
+        if not allowed(url):
+            result["robotsBlocked"] += 1
+            continue
+        page = fetch_page(url, deadline)
+        if page and _same_site(page[0], host):
+            take(page[0], page[1])
+    result["emails"] = list(seen_e.values())[:60]
+    result["phones"] = list(seen_p.values())[:20]
+    return result
+
+
+def mx_check(domain):
+    """Can this domain receive email? Asked through public DNS-over-HTTPS (free). None = could not check."""
+    for base in DOH_URLS:
+        try:
+            status, data, _ = http_json(base + "?" + urllib.parse.urlencode({"name": domain, "type": "MX"}),
+                                        headers={"Accept": "application/dns-json"})
+        except SearchError:
+            continue
+        if status != 200 or not isinstance(data, dict) or "Status" not in data:
+            continue
+        if data.get("Status") == 3:
+            return False
+        answers = [a for a in data.get("Answer") or [] if isinstance(a, dict) and a.get("type") == 15]
+        if not answers:
+            return False
+        return not all(str(a.get("data", "")).strip() in ("0 .", "0") for a in answers)
+    return None
+
+
+def mock_scan(domain, names):
+    time.sleep(0.05)
+    h = _h("site|" + domain)
+    out = {"reachable": True, "pages": ["https://www.%s/" % domain, "https://www.%s/contact" % domain],
+           "emails": [], "phones": [], "robotsBlocked": 0, "mx": h % 7 != 6}
+    if h % 5 == 4:
+        return dict(out, reachable=False, pages=[], mx=None)
+    out["emails"].append({"email": "info@%s" % domain, "page": out["pages"][1], "context": "Contact us | info@%s" % domain})
+    out["phones"].append({"number": "+1 (512) 555-%04d" % (h % 10000), "page": out["pages"][1],
+                          "context": "Call us: +1 (512) 555-%04d" % (h % 10000), "kind": "listed"})
+    for i, name in enumerate(names[:5]):
+        parts = [x for x in re.split(r"\s+", re.sub(r"[^A-Za-z\s]", "", name)) if x]
+        if len(parts) >= 2 and (h + i) % 2 == 0:
+            local = "%s.%s" % (parts[0].lower(), parts[-1].lower())
+            out["emails"].append({"email": "%s@%s" % (local, domain), "page": "https://www.%s/team" % domain,
+                                  "context": "%s | Leadership | %s@%s" % (name, local, domain)})
+    return out
+
+
+def site_scan(cfg, payload):
+    domain = str(payload.get("domain") or "").strip().lower()
+    domain = re.sub(r"^https?://", "", domain).split("/")[0]
+    if domain.startswith("www."):
+        domain = domain[4:]
+    if not re.match(r"^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?$", domain) or len(domain) > 200:
+        raise SearchError("That is not a website address.")
+    if ":" in domain and not ALLOW_PRIVATE_FETCH:
+        raise SearchError("That is not a website address.")
+    names = [str(n)[:100] for n in (payload.get("names") or [])[:50] if isinstance(n, str)]
+    if cfg["provider"] == "mock":
+        return dict(mock_scan(domain, names), ok=True, cached=False, domain=domain)
+    try:
+        max_pages = max(1, min(15, int(payload.get("maxPages") or 6)))
+        cache_days = float(payload.get("cacheDays", 30))
+    except (TypeError, ValueError):
+        raise SearchError("Bad maxPages or cacheDays value.")
+    ckey = Cache.key("site-scan-v1", domain, max_pages, "", "")
+    hit = CACHE.get(ckey, cache_days)
+    if hit is not None:
+        return dict(hit, ok=True, cached=True, domain=domain)
+    found = scan_site(domain, max_pages)
+    found["mx"] = mx_check(domain.split(":")[0])
+    CACHE.put(ckey, found)
+    return dict(found, ok=True, cached=False, domain=domain)
 
 
 # ------------------------------------------------------------------ HTTP handler
@@ -895,6 +1282,12 @@ class Handler(BaseHTTPRequestHandler):
                         log("contact lookup error: %s" % e.message)
                     return self._json(200, {"ok": False, "error": e.message, "fatal": e.fatal,
                                             "retryable": e.retryable})
+            if path == "/api/site/scan":
+                payload = self._read_json(MAX_BODY_BYTES)
+                try:
+                    return self._json(200, site_scan(load_config(), payload))
+                except SearchError as e:
+                    return self._json(200, {"ok": False, "error": e.message, "fatal": False, "retryable": False})
             if path == "/api/contact/test":
                 self._read_json(MAX_BODY_BYTES)
                 return self._json(200, test_contact_provider(load_config()))

@@ -799,6 +799,155 @@
     return null;
   }
 
+  // ---------------------------------------------------------------- free email finder (published emails + patterns)
+
+  const GENERIC_LOCAL = new Set(('info sales contact contacts contactus support help hello hi admin office team hr jobs careers '
+    + 'career recruiting recruitment talent marketing billing accounts accounting finance enquiries enquiry inquiries inquiry '
+    + 'service services customerservice customercare care press media news newsletter noreply donotreply webmaster '
+    + 'postmaster hostmaster privacy legal compliance security abuse feedback orders order booking bookings reservations '
+    + 'events partners partnership partnerships investor investors ir general mail email web it tech operations ops '
+    + 'procurement purchasing quotes quote estimates estimating dispatch reception frontdesk welcome request requests '
+    + 'appointments schedule scheduling service-request warranty claims returns shop store online ecommerce').split(' '));
+
+  function emailLocal(e) { return str(e).toLowerCase().split('@')[0]; }
+  function emailDomain(e) { return str(e).toLowerCase().split('@')[1] || ''; }
+
+  function isGenericEmail(e) {
+    const local = emailLocal(e);
+    return GENERIC_LOCAL.has(local.replace(/[^a-z]/g, '')) || /^(no-?reply|do-?not-?reply|info|sales|support)/.test(local);
+  }
+
+  function nameParts(name) {
+    const t = words(cleanPersonName(name)).filter(x => !/^\d+$/.test(x));
+    const full = t.filter(x => x.length > 1);
+    const f = full[0] || t[0] || '';
+    const l = full.length > 1 ? full[full.length - 1] : '';
+    return { f, l, fi: f.charAt(0), li: l.charAt(0) };
+  }
+
+  const EMAIL_PATTERNS = [
+    ['first.last', n => n.l && n.f + '.' + n.l],
+    ['firstlast', n => n.l && n.f + n.l],
+    ['flast', n => n.l && n.fi + n.l],
+    ['f.last', n => n.l && n.fi + '.' + n.l],
+    ['first_last', n => n.l && n.f + '_' + n.l],
+    ['first-last', n => n.l && n.f + '-' + n.l],
+    ['firstl', n => n.l && n.f + n.li],
+    ['first.l', n => n.l && n.f + '.' + n.li],
+    ['last.first', n => n.l && n.l + '.' + n.f],
+    ['lastfirst', n => n.l && n.l + n.f],
+    ['lastf', n => n.l && n.l + n.fi],
+    ['last', n => n.l],
+    ['first', n => n.f],
+  ];
+  const PATTERN_FN = Object.fromEntries(EMAIL_PATTERNS);
+
+  // Which naming pattern turns this person's name into this email's local part ("jsmith" + John Smith -> "flast").
+  function patternOf(local, n) {
+    const l = str(local).toLowerCase();
+    for (const [name, fn] of EMAIL_PATTERNS) {
+      const v = fn(n);
+      if (v && v === l) return name;
+    }
+    return null;
+  }
+
+  function namesInText(text) {
+    const out = [];
+    const re = /\b([A-Z][a-zA-Z'’-]+)(?:\s+[A-Z]\.?)?\s+([A-Z][a-zA-Z'’-]+)\b/g;
+    let m;
+    while ((m = re.exec(str(text)))) out.push(m[1] + ' ' + m[2]);
+    return out;
+  }
+
+  // The company's email format, from emails whose owner's name is known (in the same page text, or a lead
+  // with a known email); otherwise from what the found addresses look like. null when there is no evidence.
+  function inferEmailPattern(domain, emails, pairs) {
+    const votes = {}, counted = new Set();
+    const vote = (email, name) => {
+      if (counted.has(email) || emailDomain(email) !== domain || isGenericEmail(email)) return;
+      const p = patternOf(emailLocal(email), nameParts(name));
+      if (p) { votes[p] = (votes[p] || 0) + 1; counted.add(email); }
+    };
+    (pairs || []).forEach(pr => vote(str(pr.email).toLowerCase(), pr.name));
+    (emails || []).forEach(e => namesInText(e.context).forEach(nm => vote(e.email, nm)));
+    const best = Object.keys(votes).sort((a, b) => votes[b] - votes[a])[0];
+    if (best) {
+      return { pattern: best, strength: 'known',
+        basis: best + ' – seen in ' + votes[best] + ' named email' + (votes[best] === 1 ? '' : 's') + ' at ' + domain };
+    }
+    const locals = (emails || []).filter(e => emailDomain(e.email) === domain && !isGenericEmail(e.email)).map(e => emailLocal(e.email));
+    const dotted = locals.filter(l => /^[a-z]{2,}\.[a-z]{2,}$/.test(l)).length;
+    const under = locals.filter(l => /^[a-z]{2,}_[a-z]{2,}$/.test(l)).length;
+    if (dotted && dotted >= Math.max(1, locals.length / 2)) {
+      return { pattern: 'first.last', strength: 'shape', basis: 'first.last – emails at ' + domain + ' look like this (' + dotted + ' seen)' };
+    }
+    if (under && under >= Math.max(1, locals.length / 2)) {
+      return { pattern: 'first_last', strength: 'shape', basis: 'first_last – emails at ' + domain + ' look like this (' + under + ' seen)' };
+    }
+    return null;
+  }
+
+  // Emails at this domain mentioned in Google results.
+  function emailsFromResults(results, domain) {
+    const out = [], seen = new Set();
+    const re = /[A-Za-z0-9][A-Za-z0-9._%+-]{0,63}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}/g;
+    (results || []).forEach(r => {
+      const text = [r.title, r.snippet].concat(Array.isArray(r.extras) ? r.extras : []).join(' · ');
+      let m;
+      while ((m = re.exec(text))) {
+        const e = m[0].toLowerCase().replace(/\.+$/, '');
+        const d = emailDomain(e);
+        if ((d === domain || d.endsWith('.' + domain)) && !seen.has(e)) {
+          seen.add(e);
+          out.push({ email: e, source: 'Google', page: r.link || '', context: normSpace(text).slice(0, 400) });
+        }
+      }
+    });
+    return out;
+  }
+
+  // Best contact details for one lead from what was found for the company.
+  // data: {domain, emails:[{email, source, page, context}], phones:[{number, page, context, kind}], mx, pairs, companyPhone}
+  function findContact(lead, data, opts) {
+    const o = opts || {};
+    const n = nameParts(lead.name);
+    const out = { email: '', emailSource: '', guess: '', guessBasis: '', phone: '', companyPhone: '', companyEmails: '' };
+    const domain = str(data.domain).toLowerCase();
+    const emails = data.emails || [];
+    const fullName = n.f && n.l ? ' ' + n.f + ' ' + n.l + ' ' : '';
+    const named = e => fullName && wordString(e.context).includes(fullName);
+    if (n.f) {
+      for (const e of emails) {
+        if (isGenericEmail(e.email)) continue;
+        const p = patternOf(emailLocal(e.email), n);
+        const own = emailDomain(e.email) === domain;
+        // "john@" at the company is John; "smith@" or "john@gmail" need the full name next to the email.
+        if ((p && own && p !== 'last') || (p && named(e)) || (!p && named(e) && own && emailLocal(e.email).includes(n.l || '\u0000'))) {
+          out.email = e.email;
+          out.emailSource = 'Found on ' + (e.source || 'company website') + (e.page ? ' (' + e.page + ')' : '');
+          break;
+        }
+      }
+      if (!out.email && o.guess !== false && data.mx !== false && domain) {
+        const pat = inferEmailPattern(domain, emails, data.pairs);
+        const local = pat && PATTERN_FN[pat.pattern](n);
+        if (local) {
+          out.guess = local + '@' + domain;
+          out.guessBasis = 'Guess: ' + pat.basis + (data.mx === true ? '; domain accepts email' : '');
+        }
+      }
+    }
+    const phones = data.phones || [];
+    const direct = phones.find(ph => fullName && wordString(ph.context).includes(fullName) && /\b(direct|mobile|cell|m)\b/i.test(ph.context));
+    if (direct) out.phone = direct.number;
+    const listed = phones.find(ph => ph.kind === 'listed') || phones[0];
+    out.companyPhone = (listed && listed.number) || data.companyPhone || '';
+    out.companyEmails = uniq(emails.filter(e => emailDomain(e.email) === domain && isGenericEmail(e.email)).map(e => e.email)).slice(0, 3).join(', ');
+    if (data.mx === false && !out.email) out.guessBasis = domain + ' does not accept email';
+    return out;
+  }
+
   function googleUrl(query) {
     return 'https://www.google.com/search?q=' + encodeURIComponent(query);
   }
@@ -1339,7 +1488,8 @@
     normSpace, fold, words, isLocation, cleanPersonName, searchName, splitName, nameSimilarity,
     stripLegal, companyForQuery, titleForQuery, cityOf, normalizeLinkedInUrl, parseProfileResult,
     judgeResult, evaluateResults, rankCandidates, DEFAULT_TEMPLATES, queryVars, fillTemplate,
-    fixMojibake, shortName, buildFindQueries, buildXrayQueries, buildLeadPlan, buildCompanyPlan, checkLeadFilters, SENIORITY, COUNTRIES,
+    fixMojibake, shortName, buildFindQueries, findContact, inferEmailPattern, emailsFromResults, patternOf,
+    nameParts, isGenericEmail, buildXrayQueries, buildLeadPlan, buildCompanyPlan, checkLeadFilters, SENIORITY, COUNTRIES,
     countryName, normalizeCompanyUrl, parseCompanyResult, pickWebsite, pickCompanyPage, companyKey, domainFits, hostOf, sizeBucket, SIZE_BUCKETS, googleUrl, parseLeads, leadKey, looksLikeName,
     toCSV, toTSV, toXLSX, zipFiles, crc32, colName,
   };

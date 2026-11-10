@@ -21,6 +21,44 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HITS = {}
 JOBS = {}
+SITE_HITS = []
+
+
+def _cf(email, key=0x4a):
+    return "%02x" % key + "".join("%02x" % (ord(c) ^ key) for c in email)
+
+
+SITE_PAGES = {
+    "/": '<html><body><nav><a href="/contact">Contact us</a> <a href="/team/">Our team</a> <a href="/private">Board</a>'
+         ' <a href="https://elsewhere.example/contact">x</a></nav><p>Welcome to Acme Roofing.</p></body></html>',
+    "/contact": '<html><body><h1>Contact</h1><a href="mailto:info@acme.test">info@acme.test</a>'
+                '<p>Office phone: (512) 555-0100 &nbsp; Fax: (512) 555-0101</p><a href="tel:+15125550100">Call</a>'
+                '<p>Billing: <a href="/cdn-cgi/l/email-protection#%s">[email protected]</a></p></body></html>' % _cf("billing@acme.test"),
+    "/team": '<html><body><div><h3>John Smith</h3><p>CEO</p><a href="mailto:jsmith@acme.test">Email John</a></div>'
+             '<div><h3>Maria Garcia</h3><p>CFO - mgarcia [at] acme [dot] test - direct 512 555 0177</p></div></body></html>',
+    "/private": '<html><body>secret.person@acme.test</body></html>',
+    "/robots.txt": "User-agent: *\nDisallow: /private\n",
+}
+
+
+class FakeSite(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
+        SITE_HITS.append(path)
+        body = SITE_PAGES.get(path)
+        if body is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        data = body.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain" if path.endswith(".txt") else "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
 
 def free_port():
@@ -65,6 +103,10 @@ class FakeUpstream(BaseHTTPRequestHandler):
             if self.headers.get("X-API-KEY") != "good-hunter":
                 return self._reply(401, {"errors": [{"id": "authentication_failed", "code": 401, "details": "No user found"}]})
             return self._reply(200, {"data": {"requests": {"searches": {"used": 3, "available": 50}}}})
+        if u.path == "/resolve":  # DNS over HTTPS
+            if q.get("name", "").startswith("nomail"):
+                return self._reply(200, {"Status": 0, "Answer": []})
+            return self._reply(200, {"Status": 0, "Answer": [{"name": q.get("name"), "type": 15, "data": "10 mx.acme.test."}]})
         if u.path == "/v1/auth/health":  # Apollo
             ok = self.headers.get("x-api-key") == "good-apollo"
             return self._reply(200, {"healthy": True, "is_logged_in": ok})
@@ -166,11 +208,14 @@ class ServerTest(unittest.TestCase):
     def setUpClass(cls):
         cls.fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeUpstream)
         threading.Thread(target=cls.fake.serve_forever, daemon=True).start()
+        cls.site = ThreadingHTTPServer(("127.0.0.1", 0), FakeSite)
+        threading.Thread(target=cls.site.serve_forever, daemon=True).start()
         fake_url = "http://127.0.0.1:%d" % cls.fake.server_port
         cls.data = tempfile.mkdtemp(prefix="llf-test-")
         cls.port = free_port()
         env = dict(os.environ, LLF_DATA_DIR=cls.data, LLF_SERPAPI_URL=fake_url, LLF_SERPER_URL=fake_url,
                    LLF_HUNTER_URL=fake_url, LLF_APOLLO_URL=fake_url, LLF_FULLENRICH_URL=fake_url,
+                   LLF_DOH_URL=fake_url + "/resolve", LLF_ALLOW_PRIVATE_FETCH="1",
                    SERPAPI_KEY="", SERPER_API_KEY="", HUNTER_API_KEY="", APOLLO_API_KEY="", FULLENRICH_API_KEY="",
                    PYTHONIOENCODING="utf-8")
         cls.proc = subprocess.Popen([sys.executable, os.path.join(APP_DIR, "server.py"), "--port", str(cls.port), "--no-browser"],
@@ -192,6 +237,8 @@ class ServerTest(unittest.TestCase):
         cls.proc.stdout.close()
         cls.fake.shutdown()
         cls.fake.server_close()
+        cls.site.shutdown()
+        cls.site.server_close()
         shutil.rmtree(cls.data, ignore_errors=True)
 
     # helpers
@@ -297,7 +344,7 @@ class ServerTest(unittest.TestCase):
     def test_05_serpapi_errors(self):
         self.use("serpapi", "good-serpapi-key")
         s, r = self.post("/api/search", {"query": "kgtest csx", "mode": "web"})
-        self.assertEqual(r["kg"], {"title": "CSX", "website": "https://www.csx.com/"})
+        self.assertEqual(r["kg"], {"title": "CSX", "website": "https://www.csx.com/", "phone": ""})
         s, r = self.post("/api/search", {"query": "kgtest csx", "mode": "web"})
         self.assertTrue(r["cached"])
         self.assertEqual(r["kg"]["website"], "https://www.csx.com/", "the website is kept in the cache too")
@@ -477,6 +524,46 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(cfg["contactProvider"], "mock")
         self.assertTrue(cfg["keys"]["hunter"]["set"])
         self.assertNotIn("good-hunter", json.dumps(cfg))
+
+    # ---- free finder: reading a company website
+    def test_13_site_scan(self):
+        self.use("serpapi", "good-serpapi-key")  # a real (non-mock) search provider, so the real reader runs
+        domain = "127.0.0.1:%d" % self.site.server_port
+        del SITE_HITS[:]
+        s, r = self.post("/api/site/scan", {"domain": "http://" + domain + "/", "maxPages": 6, "cacheDays": 30})
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["reachable"])
+        self.assertFalse(r["cached"])
+        emails = {e["email"]: e for e in r["emails"]}
+        self.assertEqual(sorted(emails), ["billing@acme.test", "info@acme.test", "jsmith@acme.test", "mgarcia@acme.test"])
+        self.assertIn("John Smith", emails["jsmith@acme.test"]["context"], "the name next to a link-hidden email is kept")
+        self.assertTrue(emails["info@acme.test"]["page"].endswith("/contact"))
+        numbers = [p["number"] for p in r["phones"]]
+        self.assertIn("+15125550100", numbers)
+        self.assertFalse(any("0101" in n for n in numbers), "fax numbers are ignored")
+        self.assertTrue(any("555 0177" in n for n in numbers))
+        self.assertNotIn("/private", SITE_HITS, "pages the site's robots.txt forbids are not read")
+        self.assertEqual(r["robotsBlocked"], 1, "the 'Board' page was skipped because robots.txt forbids it")
+        self.assertTrue(r["mx"])
+        self.assertLessEqual(len(r["pages"]), 6)
+        s, r2 = self.post("/api/site/scan", {"domain": domain, "maxPages": 6, "cacheDays": 30})
+        self.assertTrue(r2["cached"], "a website is read once, then remembered")
+        for bad in ("not a domain", "javascript:alert(1)", ""):
+            s, r = self.post("/api/site/scan", {"domain": bad})
+            self.assertFalse(r["ok"], bad)
+        self.use("mock")
+        s, r = self.post("/api/site/scan", {"domain": "acme-roofing.com", "names": ["John Smith", "Maria Garcia"]})
+        self.assertTrue(r["ok"])
+
+    def test_14_never_reads_local_addresses(self):
+        sys.path.insert(0, APP_DIR)
+        import server as srv
+        self.assertFalse(srv.ALLOW_PRIVATE_FETCH)
+        for host in ("127.0.0.1", "localhost", "10.1.2.3", "192.168.1.1", "169.254.169.254", "::1"):
+            self.assertFalse(srv.host_is_public(host), host)
+        self.assertIsNone(srv.fetch_page("http://127.0.0.1:%d/" % self.site.server_port, time.time() + 5))
+        self.assertIsNone(srv.fetch_page("file:///etc/passwd", time.time() + 5))
+        self.assertEqual(srv.decode_cfemail(_cf("a.b@c.de")), "a.b@c.de")
 
 
 if __name__ == "__main__":

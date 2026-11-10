@@ -401,3 +401,40 @@ test('company details: website and LinkedIn company page picked from Google resu
   assert.equal(C.pickCompanyPage('Congruex', [{ title: 'Other Mock Holdings | LinkedIn', link: 'https://www.linkedin.com/company/x' }]), null);
   assert.equal(C.companyKey('Bison Transport Inc.'), C.companyKey('Bison Transport'));
 });
+
+test('free email finder: published emails, patterns, guesses, phones', () => {
+  const n = C.nameParts('Dr. John P. Smith, MBA');
+  assert.deepEqual(['john.smith', 'jsmith', 'john', 'smith', 'j.smith', 'xyz'].map(l => C.patternOf(l, n)),
+    ['first.last', 'flast', 'first', 'last', 'f.last', null]);
+  const data = { domain: 'acme.com', mx: true, pairs: [], emails: [
+    { email: 'maria.garcia@acme.com', source: 'company website', page: 'https://acme.com/team', context: 'Maria Garcia | CFO | maria.garcia@acme.com' },
+    { email: 'info@acme.com', source: 'company website', page: 'https://acme.com/contact', context: 'Contact us' },
+    { email: 'tom.lee@acme.com', source: 'Google', page: 'https://x.com', context: 'Tom Lee, VP Sales tom.lee@acme.com' }],
+    phones: [{ number: '+1 (512) 555-0100', kind: 'listed', context: 'Call us' },
+      { number: '512 555 0177', kind: 'text', context: 'Maria Garcia CFO direct 512 555 0177' }] };
+  const tom = C.findContact({ name: 'Tom Lee' }, data);
+  assert.deepEqual([tom.email, tom.emailSource, tom.guess, tom.companyPhone, tom.companyEmails],
+    ['tom.lee@acme.com', 'Found on Google (https://x.com)', '', '+1 (512) 555-0100', 'info@acme.com']);
+  const rob = C.findContact({ name: 'Robert James' }, data);
+  assert.equal(rob.email, '');
+  assert.equal(rob.guess, 'robert.james@acme.com');
+  assert.match(rob.guessBasis, /first\.last – seen in 2 named emails at acme\.com; domain accepts email/);
+  assert.equal(C.findContact({ name: 'Maria Garcia' }, data).phone, '512 555 0177');
+  assert.equal(C.findContact({ name: 'Robert James' }, data, { guess: false }).guess, '');
+  const noMail = C.findContact({ name: 'Robert James' }, Object.assign({}, data, { mx: false }));
+  assert.deepEqual([noMail.guess, noMail.guessBasis], ['', 'acme.com does not accept email']);
+  // "john@" at the company is John Smith; "smith@" or a gmail address needs the full name next to it
+  const one = e => C.findContact({ name: 'John Smith' }, { domain: 'acme.com', emails: [e], phones: [] }).email;
+  assert.equal(one({ email: 'john@acme.com', context: '' }), 'john@acme.com');
+  assert.equal(one({ email: 'smith@acme.com', context: '' }), '');
+  assert.equal(one({ email: 'smith@acme.com', context: 'John Smith, Owner: smith@acme.com' }), 'smith@acme.com');
+  assert.equal(one({ email: 'johnsmith@gmail.com', context: '' }), '');
+  assert.equal(one({ email: 'johnsmith@gmail.com', context: 'Owner John Smith johnsmith@gmail.com' }), 'johnsmith@gmail.com');
+  assert.equal(one({ email: 'sales@acme.com', context: 'John Smith sales@acme.com' }), '');
+  // pattern from a known lead's email, or from what the addresses look like
+  assert.equal(C.inferEmailPattern('acme.com', [{ email: 'jsmith@acme.com' }], [{ name: 'John Smith', email: 'jsmith@acme.com' }]).pattern, 'flast');
+  assert.equal(C.inferEmailPattern('acme.com', [{ email: 'cc.dd@acme.com' }, { email: 'sales@acme.com' }], []).strength, 'shape');
+  assert.equal(C.inferEmailPattern('acme.com', [{ email: 'xyz@acme.com' }], []), null);
+  assert.deepEqual(C.emailsFromResults([{ title: 'Acme', snippet: 'Reach john.smith@acme.com or sales@acme.com. Not bob@other.com.', link: 'https://a.b' }], 'acme.com')
+    .map(e => e.email), ['john.smith@acme.com', 'sales@acme.com']);
+});

@@ -225,6 +225,34 @@ function readXlsx(file) {
     assert.equal(fe.jobs, 0, 'finished batch is cleared');
     step('FullEnrich batch: ' + fePending + ' leads in 1 batch, ' + fe.feEmails + ' new emails, ' + fe.fePhones + ' new phones, earlier emails kept');
 
+    // 3e. Free finder (no paid account): company websites + Google + email patterns, simulated in mock mode.
+    await page.click('#openSettings');
+    await page.selectOption('#contactProvider', 'free');
+    await waitFor(async () => /Free mode on/.test(await page.textContent('#contactMsg')), 5000, 'free mode saved');
+    assert.equal(await page.isVisible('#contactKey'), false, 'Free mode needs no key');
+    assert.equal(await page.isVisible('#freeGoogle'), true);
+    await page.keyboard.press('Escape');
+    const freeBefore = await page.evaluate(() => {
+      // start from scratch: forget what the earlier (mock / FullEnrich) steps found
+      const rows = window.__llf.state.rows.filter(r => r.status === 'Matched');
+      rows.forEach(r => { r.email = ''; r.emailStatus = ''; r.phone = ''; r.contactTried = ''; r.contactSource = ''; });
+      return rows.length;
+    });
+    await page.click('#contactBtn');
+    await waitFor(async () => /Finished/.test(await page.textContent('#progressText')), 60000, 'free contact finder');
+    const fr = await page.evaluate(() => {
+      const rows = window.__llf.state.rows.filter(r => r.status === 'Matched');
+      return { guesses: rows.filter(r => !r.email && /@/.test(r.emailGuess)).length, coPhones: rows.filter(r => r.companyPhone).length,
+        websiteEmails: rows.filter(r => /Found on company website/.test(r.emailStatus)).length,
+        guessInEmail: rows.filter(r => r.email && r.email === r.emailGuess).length, domains: Object.keys(window.__llf.state.domainContacts).length };
+    });
+    assert.ok(fr.coPhones >= 3 && fr.domains >= 3, JSON.stringify(fr));
+    assert.ok(fr.guesses + fr.websiteEmails >= 1, JSON.stringify(fr));
+    assert.equal(fr.guessInEmail, 0, 'guesses never go into the Email column');
+    assert.match(await page.textContent('#progressText'), /Contacts \(free\): \d+ published emails found, \d+ likely emails from company patterns/);
+    step('free finder: ' + freeBefore + ' leads without email -> ' + fr.websiteEmails + ' found on websites, ' + fr.guesses
+      + ' guessed from patterns, ' + fr.coPhones + ' company phones');
+
     // 4. Downloads.
     const [xdl] = await Promise.all([page.waitForEvent('download'), page.click('#xlsxBtn')]);
     assert.match(xdl.suggestedFilename(), /^linkedin-leads_\d{4}-\d{2}-\d{2}_\d{4}\.xlsx$/);
@@ -233,7 +261,7 @@ function readXlsx(file) {
     const sheet = readXlsx(xfile);
     assert.equal(sheet.length, 26);
     assert.deepEqual(sheet[0].slice(0, 8), ['No.', 'Full Name', 'First Name', 'Last Name', 'Job Title', 'Company', 'Location', 'LinkedIn URL']);
-    for (const h of ['Company Website', 'Company LinkedIn URL', 'Company Industry', 'Title on LinkedIn', 'Email', 'Email Status', 'Phone']) assert.ok(sheet[0].includes(h), h);
+    for (const h of ['Company Website', 'Company LinkedIn URL', 'Company Industry', 'Title on LinkedIn', 'Email', 'Email Status', 'Phone', 'Email (guessed)', 'Company Phone']) assert.ok(sheet[0].includes(h), h);
     assert.deepEqual(sheet[1].slice(0, 7), [1, 'Dr. Kerlin Sara Wilson', 'Kerlin', 'Sara Wilson', 'Head of Strategic Operations & Corporate Relations', 'nice Neotech Medical Systems Pvt. Ltd.', 'Chennai, Tamil Nadu, India']);
     step('Excel download works and opens: ' + sheet.length + ' rows incl. header');
 
