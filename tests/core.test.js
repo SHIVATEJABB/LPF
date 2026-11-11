@@ -438,3 +438,19 @@ test('free email finder: published emails, patterns, guesses, phones', () => {
   assert.deepEqual(C.emailsFromResults([{ title: 'Acme', snippet: 'Reach john.smith@acme.com or sales@acme.com. Not bob@other.com.', link: 'https://a.b' }], 'acme.com')
     .map(e => e.email), ['john.smith@acme.com', 'sales@acme.com']);
 });
+
+test('LinkedIn search page: pronouns, "2nd degree connection", "Current:" lines', () => {
+  const paste = ['RajKumar Thanigaimalai', 'View RajKumar Thanigaimalai’s profile', 'RajKumar Thanigaimalai', ' • 2nd', '2nd degree connection', 'He/Him',
+    'Digital Marketer | SEO Specialist | Performance Marketing', 'Chennai, Tamil Nadu, India', 'Current: Digital Marketing Manager at Bluepeak Health',
+    'Provides services - SEO, Content Marketing', '12 other mutual connections', 'Connect', '',
+    'Priya Raman', 'View Priya Raman’s profile', 'Priya Raman (She/Her)', ' • 3rd+', '3rd+ degree connection', 'She/Her',
+    'Head of Sales at Zenith Labs', 'Bengaluru, Karnataka, India', 'Status is online', 'Message'].join('\n');
+  assert.deepEqual(C.parseLeads(paste).leads.map(l => [l.name, l.title, l.company, l.location, l.degree]), [
+    ['RajKumar Thanigaimalai', 'Digital Marketing Manager', 'Bluepeak Health', 'Chennai, Tamil Nadu, India', '2nd'],
+    ['Priya Raman', 'Head of Sales', 'Zenith Labs', 'Bengaluru, Karnataka, India', '3rd+']]);
+  assert.equal(C.cleanTitle('He/Him'), '');
+  assert.equal(C.cleanTitle('(she/her)'), '');
+  assert.equal(C.cleanTitle('CEO'), 'CEO');
+  assert.equal(C.cleanPersonName('RajKumar Thanigaimalai He/Him'), 'RajKumar Thanigaimalai');
+  assert.equal(C.searchName('Priya Raman (She/Her)'), 'Priya Raman');
+});

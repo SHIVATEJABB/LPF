@@ -199,6 +199,7 @@ No dependencies: the server is Python standard library only, and the page is pla
 node --test tests/core.test.js                    # parser, matcher, query builder, CSV/XLSX writer
 python3 -m unittest discover -s tests -v          # server against a fake SerpApi/Serper
 node tests/e2e.js                                 # real Chromium: paste → search → download (needs Playwright)
+node tests/e2e_upgrade.js                         # a sheet saved by an older version is repaired and filled in
 ```
 
 `tests/fixtures/saved_leads_sample.txt` is a real Sales Navigator "saved leads" paste (25 people).

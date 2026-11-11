@@ -129,8 +129,11 @@
   function isInitial(token) { return /^\p{L}\.?$/u.test(token); }
 
   // "Prof  Dr. Hariharan Ramakrishnan, PhD (He/Him) 🚀" -> "Hariharan Ramakrishnan"
+  // "He/Him", "(she/her)", "They/Them" next to names on LinkedIn.
+  const PRONOUNS = /\(?\s*\b(he|she|they|ze|xe)\s*\/\s*(him|her|them|they|hir|xem|his|hers|theirs|she|he)\b(\s*\/\s*\w+)?\s*\)?/gi;
+
   function cleanPersonName(raw) {
-    let s = normSpace(raw).replace(/\([^)]*\)|\[[^\]]*\]|\{[^}]*\}/g, ' ');
+    let s = normSpace(raw).replace(PRONOUNS, ' ').replace(/\([^)]*\)|\[[^\]]*\]|\{[^}]*\}/g, ' ');
     s = s.replace(/[^\p{L}\p{M}\p{N}\s.'’,-]/gu, ' ');
     const comma = s.indexOf(',');
     if (comma > 0) s = s.slice(0, comma);
@@ -957,9 +960,18 @@
   const SELECT_RE = /^select\s+(?!all\b)(.+)$/i;
   const PIC_RE = /^(.+?)['’`]s?\s+profile (?:picture|photo|image)$/i;
   const VIEW_RE = /^view\s+(.+?)['’`]s?\s+profile$/i;
-  const DEGREE_RE = /^(?:[·•]\s*)?(1st|2nd|3rd\+?)$|^(first|second|third)[- ]degree connection$/i;
+  const DEGREE_RE = /^(?:[·•]\s*)?(1st|2nd|3rd\+?)$|^(first|second|third|1st|2nd|3rd\+?)[- ]degree connection$/i;
   const STOP_RE = /^(add note|edit note|view note|\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{2}-\d{2})$/i;
   const NOISE = [
+    /^\(?\s*(he|she|they|ze|xe)\s*\/\s*(him|her|them|they|hir|xem|his|hers|theirs|she|he)(\s*\/\s*\w+)?\s*\)?$/i,
+    /^(1st|2nd|3rd\+?)[- ]degree connection$/i,
+    /^member['’]s (name|occupation)$/i,
+    /^status is (online|offline|reachable|away|busy)$/i,
+    /^(verified|has verifications?|linkedin member|top voice|influencer|creator)$/i,
+    /^provides services\b/i,
+    /^(followed by|follows)\b/i,
+    /^[\d,.]+\s*[km]?\+?\s+(followers|connections)$/i,
+    /^(view|see) (full )?profile$/i,
     /^select all\b/i,
     /profile (picture|photo|image)$/i,
     /^view .+ profile$/i,
@@ -993,6 +1005,12 @@
   ];
 
   function isNoise(text) { return NOISE.some(re => re.test(text)); }
+
+  // A job title that is really pronouns or page noise is no title.
+  function cleanTitle(title) {
+    const t = normSpace(title);
+    return !t || isNoise(t) || !normSpace(t.replace(PRONOUNS, '')) ? '' : t;
+  }
 
   function looksLikeName(s) {
     const t = normSpace(s);
@@ -1050,7 +1068,13 @@
   }
 
   function assignFields(content) {
-    const L = content.slice();
+    // "Current: Digital Marketing Manager at Bluepeak" (LinkedIn search) names the job and company exactly.
+    let current = '';
+    const L = content.filter(x => {
+      const m = x.text.match(/^current\s*:\s*(.+)$/i);
+      if (m && !current) { current = normSpace(m[1]); return false; }
+      return true;
+    });
     let location = '';
     let locIdx = -1;
     for (let i = L.length - 1; i >= 0; i--) {
@@ -1072,11 +1096,18 @@
       else if (dot) { title = normSpace(dot[1]); company = normSpace(dot[2]); }
     }
     company = company.replace(/^(company|account|current company)\s*:\s*/i, '');
-    return { title, company, location };
+    if (current) {
+      const at = current.match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
+      if (at) { title = normSpace(at[1]); company = normSpace(at[2]); }
+      else if (!title) title = current;
+    }
+    return { title: cleanTitle(title), company, location };
   }
 
   function parseAnchored(L, anchors) {
     const knownNames = new Set(anchors.map(a => fold(a.name)));
+    const knownClean = new Set(anchors.map(a => fold(cleanPersonName(a.name))).filter(Boolean));
+    const isName = text => knownNames.has(fold(text)) || knownClean.has(fold(cleanPersonName(text)));
     const leads = [];
     anchors.forEach((a, n) => {
       const end = n + 1 < anchors.length ? anchors[n + 1].index : L.length;
@@ -1091,11 +1122,11 @@
           if (!degree) degree = dm[1] ? dm[1].toLowerCase() : { first: '1st', second: '2nd', third: '3rd' }[dm[2].toLowerCase()];
           continue;
         }
-        if (knownNames.has(fold(ln.text))) continue;
+        if (isName(ln.text)) continue;
         const an = anchorName(ln.text);
-        if (an && knownNames.has(fold(an.name))) continue;
+        if (an && isName(an.name)) continue;
         if (isNoise(ln.text)) continue;
-        if (ln.text.length > 160) continue; // "About" paragraphs
+        if (ln.text.length > 230) continue; // "About" paragraphs (headlines are at most ~220 characters)
         content.push(ln);
       }
       const f = assignFields(content);
@@ -1488,7 +1519,7 @@
     normSpace, fold, words, isLocation, cleanPersonName, searchName, splitName, nameSimilarity,
     stripLegal, companyForQuery, titleForQuery, cityOf, normalizeLinkedInUrl, parseProfileResult,
     judgeResult, evaluateResults, rankCandidates, DEFAULT_TEMPLATES, queryVars, fillTemplate,
-    fixMojibake, shortName, buildFindQueries, findContact, inferEmailPattern, emailsFromResults, patternOf,
+    fixMojibake, shortName, cleanTitle, buildFindQueries, findContact, inferEmailPattern, emailsFromResults, patternOf,
     nameParts, isGenericEmail, buildXrayQueries, buildLeadPlan, buildCompanyPlan, checkLeadFilters, SENIORITY, COUNTRIES,
     countryName, normalizeCompanyUrl, parseCompanyResult, pickWebsite, pickCompanyPage, companyKey, domainFits, hostOf, sizeBucket, SIZE_BUCKETS, googleUrl, parseLeads, leadKey, looksLikeName,
     toCSV, toTSV, toXLSX, zipFiles, crc32, colName,

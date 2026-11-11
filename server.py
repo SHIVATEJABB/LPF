@@ -32,7 +32,7 @@ import webbrowser
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
 DATA_DIR = os.environ.get("LLF_DATA_DIR") or os.path.join(APP_DIR, "data")
@@ -440,6 +440,14 @@ def search_mock(query, page, mode, meta=None):
                 "extras": [ploc, ptitle, company],
             })
         return out + noise[:1], page < 5
+    one = re.match(r"^site:linkedin\.com/(in|pub)/([^\s\"]+)$", query.strip())
+    if one and page == 1:
+        slug = one.group(2)
+        nice = " ".join(w.capitalize() for w in re.split(r"[-_]+", slug) if not re.match(r"^[0-9a-f]{5,}$", w))
+        return [{"title": "%s - Digital Marketing Manager - Mock Media Pvt Ltd | LinkedIn" % (nice or "Mock Person"),
+                 "link": "https://in.linkedin.com/%s/%s" % (one.group(1), slug),
+                 "snippet": "Digital Marketing Manager at Mock Media · Experience: Mock Media Pvt Ltd · Location: Chennai",
+                 "extras": []}], False
     if not phrases or page > 1:
         return [], False
     name = phrases[0]

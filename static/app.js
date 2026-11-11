@@ -70,12 +70,15 @@
     freeGoogle: true, freePerson: false, freeGuess: true, freePages: 6,
     gl: '', hl: 'en', concurrency: 2, delayMs: 300, matchMin: 75, reviewMin: 50, cacheDays: 30,
     templates: C.DEFAULT_TEMPLATES.join('\n'),
-    exportScope: 'all', exportColumns: DEFAULT_EXPORT.slice(),
+    exportScope: 'all', exportColumns: DEFAULT_EXPORT.slice(), exportColumnsSeen: [],
     xray: { titles: '', functions: '', seniority: [], companies: '', locations: '', country: '', keywords: '', excludes: '',
       raw: '', target: 300, maxPages: 5, combineTitles: false, currentOnly: true, strict: false },
     company: { keywords: '', locations: '', country: '', excludes: '', raw: '', sizes: [], unknownSize: true, target: 100, maxPages: 5 },
   };
   const NESTED = ['xray', 'company'];
+  // The export columns of version 2.0, for settings saved before the tool remembered which columns it knew.
+  const FIRST_VERSION_COLUMNS = ['no', 'name', 'firstName', 'lastName', 'title', 'company', 'location', 'url', 'statusText',
+    'confidence', 'degree', 'resultTitle', 'snippet', 'query', 'source', 'note'];
 
   // ---------------------------------------------------------------- state
 
@@ -112,16 +115,24 @@
         if (!saved[n] || typeof saved[n] !== 'object') return;
         Object.keys(DEFAULTS[n]).forEach(k => { if (same(saved[n][k], DEFAULTS[n][k])) s[n][k] = saved[n][k]; });
       });
-      if (Array.isArray(saved.exportColumns)) s.exportColumns = saved.exportColumns.filter(k => COLUMNS.some(c => c.key === k));
+      if (Array.isArray(saved.exportColumns)) {
+        s.exportColumns = saved.exportColumns.filter(k => COLUMNS.some(c => c.key === k));
+        // Columns that did not exist yet when this choice was saved are switched on (they used to stay hidden forever).
+        const seen = Array.isArray(saved.exportColumnsSeen) && saved.exportColumnsSeen.length ? saved.exportColumnsSeen : FIRST_VERSION_COLUMNS;
+        DEFAULT_EXPORT.forEach(k => { if (!seen.includes(k) && !s.exportColumns.includes(k)) s.exportColumns.push(k); });
+        s.exportColumns = COLUMNS.map(c => c.key).filter(k => s.exportColumns.includes(k));
+      }
     }
     if (!s.exportColumns.length) s.exportColumns = DEFAULT_EXPORT.slice();
+    s.exportColumnsSeen = COLUMNS.map(c => c.key);
     return s;
   }
 
   const ROW_FIELDS = ['name', 'firstName', 'lastName', 'title', 'company', 'location', 'degree', 'source', 'url',
     'status', 'resultTitle', 'snippet', 'query', 'note', 'error', 'match', 'email',
     'liTitle', 'liCompany', 'liLocation', 'companyUrl', 'website', 'companyIndustry', 'companySize', 'companyHq',
-    'phone', 'emailStatus', 'contactSource', 'contactTried', 'emailGuess', 'emailGuessBasis', 'companyPhone', 'companyEmails'];
+    'phone', 'emailStatus', 'contactSource', 'contactTried', 'emailGuess', 'emailGuessBasis', 'companyPhone', 'companyEmails',
+    'profileChecked'];
   const COMPANY_FIELDS = ['name', 'url', 'industry', 'size', 'sizeBucket', 'hq', 'followers', 'website', 'snippet', 'query'];
 
   function sanitizeCompany(c, id) {
@@ -134,6 +145,7 @@
     const row = { id };
     ROW_FIELDS.forEach(k => { row[k] = r[k] == null ? '' : String(r[k]); });
     row.confidence = int(r.confidence, 0, 0, 100);
+    if (row.title && !C.cleanTitle(row.title)) row.title = '';
     if (!GROUP[row.status] || row.status === 'Searching') row.status = row.url ? 'Manual' : 'Pending';
     row.candidates = Array.isArray(r.candidates) ? r.candidates.slice(0, 5).map(c => ({
       url: String(c.url || ''), name: String(c.name || ''), resultTitle: String(c.resultTitle || ''),
@@ -988,10 +1000,53 @@
   }
 
   // Runs inside a search run (after people and companies) or on its own from the button.
+  // Rows whose LinkedIn URL you typed or imported never had a Google result: read it once to get title, company, location.
+  function needsProfile(r) {
+    return /linkedin\.com\/(in|pub)\//i.test(r.url) && !r.liTitle && !r.liCompany && (!r.company || !r.title)
+      && r.profileChecked !== '1';
+  }
+
+  async function fillFromProfiles(rows) {
+    const todo = rows.filter(needsProfile);
+    if (!todo.length || !keyReady()) return 0;
+    const kind = run.kind;
+    run.kind = 'profiles';
+    run.total = todo.length;
+    run.done = 0;
+    renderProgress();
+    let filled = 0;
+    await runPool(todo, async r => {
+      await waitIfPaused();
+      if (run.stop) return;
+      const m = r.url.match(/linkedin\.com\/(in|pub)\/[^?#\s]+/i);
+      const resp = await doSearch('site:' + m[0].replace(/\/+$/, ''), 1, 'find');
+      if (!resp.ok) return;
+      const hit = resp.results.map(C.parseProfileResult).find(p => p && p.url === r.url);
+      if (hit) {
+        r.liTitle = hit.title || hit.headline || '';
+        r.liCompany = hit.company || '';
+        r.liLocation = hit.location || '';
+        r.resultTitle = r.resultTitle || trunc(hit.resultTitle, 300);
+        r.snippet = r.snippet || trunc(hit.snippet, 500);
+        fillBlanksFromLinkedIn(r);
+        filled++;
+      }
+      r.profileChecked = '1';
+      run.done++;
+      renderProgress();
+      scheduleRender();
+      scheduleSave();
+    }, state.settings.concurrency);
+    run.kind = kind;
+    return filled;
+  }
+
   async function lookUpContacts(list) {
     const want = contactWants();
     const cp = server.contactProvider || 'free';
     if (!want.any || (!list.length && !state.contactJobs.length)) return '';
+    await fillFromProfiles(list);
+    if (run.stop) return '';
     if (cp === 'free') return lookUpContactsFree(list, want);
     run.kind = 'contacts';
     run.total = list.length;
@@ -1285,21 +1340,32 @@
   async function runCompanyDetails() {
     if (!companySearchesEach()) { toast('Tick “Company website” or “Company LinkedIn page” first.'); return; }
     if (!preflight()) return;
-    const list = companiesToLookUp(state.rows);
-    if (!list.length) {
+    const profiles = state.rows.filter(needsProfile);
+    const pending = companiesToLookUp(state.rows);
+    if (!profiles.length && !pending.length) {
       state.rows.forEach(applyCompanyInfo);
       renderAll();
       toast(state.rows.length ? 'All companies in the sheet are already looked up.' : 'Add some leads first.');
       return;
     }
-    const max = list.length * companySearchesEach();
+    const max = profiles.length + pending.length * companySearchesEach();
     if (server.provider !== 'mock' && max > 50
-      && !window.confirm('Look up ' + plural(list.length, 'company').replace('companys', 'companies') + '? This can use up to '
-        + max + ' search credits. Searches already cached are free.')) return;
-    startRun('companyinfo', list.length);
-    const summary = await lookUpCompanies(list);
-    await finishRun(summary);
+      && !window.confirm('Look up ' + plural(pending.length, 'company').replace('companys', 'companies')
+        + (profiles.length ? ' and read ' + plural(profiles.length, 'LinkedIn profile') + ' that have no company yet' : '')
+        + '? This can use up to ' + max + ' search credits. Searches already cached are free.')) return;
+    startRun('companyinfo', pending.length);
+    let summary = '';
+    if (profiles.length) {
+      const filled = await fillFromProfiles(profiles);
+      summary += 'Read ' + plural(profiles.length, 'LinkedIn profile') + ' (' + filled + ' filled in title/company). ';
+    }
+    if (!run.stop) {
+      const list = companiesToLookUp(state.rows);
+      if (list.length) summary += await lookUpCompanies(list);
+    }
+    await finishRun(summary || 'Nothing left to look up.');
   }
+
 
   function xrayOptions() { return Object.assign({}, state.settings.xray); }
 
@@ -1586,7 +1652,8 @@
     }
     const what = run.kind === 'xray' ? 'matching leads found' : run.kind === 'company' ? 'companies found'
       : run.kind === 'companyinfo' ? 'companies looked up (website, LinkedIn page)'
-      : run.kind === 'contacts' ? 'leads looked up for email / phone' : 'leads searched';
+      : run.kind === 'contacts' ? 'leads looked up for email / phone'
+      : run.kind === 'profiles' ? 'LinkedIn profiles read (title, company)' : 'leads searched';
     setMsg('progressText', (run.paused ? 'Paused · ' : '') + run.done + ' / ' + run.total + ' ' + what + ' · '
       + run.credits + ' credits used' + (run.cached ? ' · ' + run.cached + ' cached' : '')
       + (run.errors ? ' · ' + plural(run.errors, 'error') : '') + eta);
